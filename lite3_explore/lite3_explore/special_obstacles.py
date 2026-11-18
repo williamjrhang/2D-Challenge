@@ -97,6 +97,11 @@ class SpecialObstacles(Node):
         p('level_pitch_deg', 3.0)            # tilt that means "level again"
         p('level_hold_s', 1.5)               # must stay level this long to finish
         p('stairs_min_distance_m', 0.5)
+        # True: the stairs go UP, (platform), then DOWN. Finish only after a tilt one way,
+        # then a tilt the OTHER way, then level -> AI stays on for the whole thing and is not
+        # switched off on the platform. Works whatever the IMU's pitch sign convention is.
+        p('stairs_up_and_down', True)
+        p('stairs_max_time_s', 120.0)        # stairs time limit (up + platform + down is slow)
 
         # Distances to walk
         p('rubble_distance_m', 1.2)          # TODO: size of a rubble cell + margin
@@ -142,6 +147,9 @@ class SpecialObstacles(Node):
         self.start_yaw = None
         self.was_on_stairs = False
         self.level_since = None
+        self.first_tilt_sign = 0    # +1 / -1: sign of pitch on the first flight (0 = not yet)
+        self.second_flight = False  # tilted the other way after the first flight
+        self.platform_logged = False
         self.window_start = 0.0
         self.window_xy = None
         self.abort_reason = ''
@@ -309,7 +317,9 @@ class SpecialObstacles(Node):
             if abs(self.roll) > limit or abs(self.pitch) > pitch_limit:
                 self.abort(f'tilt roll={math.degrees(self.roll):.0f} '
                            f'pitch={math.degrees(self.pitch):.0f} deg')
-            elif self.now_s() - self.start_time > self.P['max_time_s']:
+            elif self.now_s() - self.start_time > (self.P['stairs_max_time_s']
+                                                   if self.kind == 'stairs'
+                                                   else self.P['max_time_s']):
                 self.abort('took too long')
 
         getattr(self, f'do_{self.phase.lower()}')()
@@ -347,6 +357,9 @@ class SpecialObstacles(Node):
         self.dr_last = self.now_s()
         self.was_on_stairs = False
         self.level_since = None
+        self.first_tilt_sign = 0
+        self.second_flight = False
+        self.platform_logged = False
         self.window_start = self.now_s()
         self.window_xy = self.xy
         self.set_phase('CROSS')
@@ -378,12 +391,26 @@ class SpecialObstacles(Node):
         # Finished?
         dist = self.walked_enough_for
         if self.kind == 'stairs':
-            pitch_deg = abs(math.degrees(self.pitch))
-            if pitch_deg > self.P['on_stairs_pitch_deg']:
+            pitch_deg = math.degrees(self.pitch)
+            if abs(pitch_deg) > self.P['on_stairs_pitch_deg']:
+                sign = 1 if pitch_deg > 0 else -1
+                if self.first_tilt_sign == 0:
+                    self.first_tilt_sign = sign
+                    self.get_logger().info(f'stairs: on the first flight (pitch {pitch_deg:.0f} deg)')
+                elif sign != self.first_tilt_sign and not self.second_flight:
+                    self.second_flight = True
+                    self.get_logger().info(f'stairs: on the second flight (pitch {pitch_deg:.0f} deg)')
                 self.was_on_stairs = True
                 self.level_since = None
-            elif self.was_on_stairs and pitch_deg < self.P['level_pitch_deg']:
-                if self.level_since is None:
+            elif self.was_on_stairs and abs(pitch_deg) < self.P['level_pitch_deg']:
+                if self.P['stairs_up_and_down'] and not self.second_flight:
+                    # Level, but only after one flight: this is the platform. Keep AI on and
+                    # keep walking straight until the robot goes down the other side.
+                    self.level_since = None
+                    if not self.platform_logged:
+                        self.platform_logged = True
+                        self.get_logger().info('stairs: level on the platform, keep walking (AI stays on)')
+                elif self.level_since is None:
                     self.level_since = now
                 elif (now - self.level_since > self.P['level_hold_s']
                       and dist(self.P['stairs_min_distance_m'])):

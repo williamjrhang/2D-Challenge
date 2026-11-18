@@ -41,6 +41,9 @@ special_obstacles:
     level_pitch_deg: 3.0            # tilt when level again
     level_hold_s: 1.5
     stairs_min_distance_m: 0.5
+    stairs_up_and_down: true        # UP, platform, DOWN in ONE AI session: finish only after
+                                    # tilting one way, then the other way, then level
+    stairs_max_time_s: 120.0        # stairs time limit (max_time_s below is for the others)
 
     # ---- Distances (m) ----
     rubble_distance_m: 1.2          # TODO: rubble cell length + margin

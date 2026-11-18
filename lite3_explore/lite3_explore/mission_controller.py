@@ -68,7 +68,9 @@ class MissionController(Node):
         p('look_every_s', 0.0)              # regular stop-and-look (0 = off: the VLM now asks
                                             # in the background while moving)
         p('investigate_timeout_s', 20.0)    # give up looking after this
-        p('traverse_timeout_s', 60.0)       # give up on stairs/rubble/curtain after this
+        p('traverse_timeout_s', 150.0)      # backup only: keep ABOVE special_obstacles'
+                                            # stairs_max_time_s (120) + backoff + restore,
+                                            # else 'stop' exits AI mode on the steps
         p('exit_timeout_s', 120.0)
         p('look_cooldown_s', 5.0)           # ignore new look events right after a look
         g = lambda n: self.get_parameter(n).value
