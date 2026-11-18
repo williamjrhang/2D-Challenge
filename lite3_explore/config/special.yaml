@@ -1,0 +1,57 @@
+special_obstacles:
+  ros__parameters:
+    # ---- Topics: check with `ros2 topic list` on the robot ----
+    imu_topic: /imu/data            # TODO: real Lite3 IMU topic
+    odom_topics: [/leg_odom2, /odom]   # first fresh one is used; none -> walk by time
+    cmd_vel_topic: /nav_cmd_vel     # twist_mux input (joystick /joy_cmd_vel overrides). NEVER /cmd_vel
+
+    # ---- Gait codes for /simple_cmd (0 = don't switch) ----
+    # From the Jueying Lite3 guide, "Motion Host Communication Interface" 1.2.5.
+    # Written in decimal because ROS parameter files may not read 0x... as a number.
+    #   553714432 = 0x21010300  Flat gait, Slow gear   (default standing gait)
+    #   553714439 = 0x21010307  Flat gait, Medium gear
+    #   553714694 = 0x21010406  Flat gait, Crawl gear
+    #   553714689 = 0x21010401  RUG gait, General gear (rough ground)
+    #   553714690 = 0x21010402  RUG gait, Grip gear
+    #   553714695 = 0x21010407  RUG gait, H-Step gear  (high-lift steps)
+    # Gaits only switch in Move mode and NOT in AI state.
+    # Start with 0 (off) and switch them on one at a time after a hand test.
+    # Gait per terrain (hand-tested 17/11). After every crossing it goes back to normal_gait_code.
+    normal_gait_code: 553714432     # 0x21010300 Flat Slow  - flat floor (= explorer gait_code)
+    stairs_gait_code: 0             # not used while stairs_use_ai_mode is true
+
+    # ---- Stairs = AI mode (organisers' rule, 17/11) ----
+    # ONLY for stairs: enter at most 1 cell before, exit at most 1 cell after.
+    # AI mode on any other terrain = no points for it. No jumps / stunts.
+    stairs_use_ai_mode: true
+    ai_enter_code: 553714984        # 0x21010528 Enter AI
+    ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
+    stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
+    rubble_gait_code: 553714689     # 0x21010401 RUG General  - uneven terrain  ✅ tested
+    potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
+
+    # ---- Speeds (m/s): start slow, raise only after it works ----
+    stairs_speed: 0.10
+    rubble_speed: 0.12
+    curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)
+    potholes_speed: 0.10
+
+    # ---- Stairs: MEASURE on a real step (ros2 topic echo the IMU) ----
+    on_stairs_pitch_deg: 8.0        # tilt while on the steps
+    level_pitch_deg: 3.0            # tilt when level again
+    level_hold_s: 1.5
+    stairs_min_distance_m: 0.5
+
+    # ---- Distances (m) ----
+    rubble_distance_m: 1.2          # TODO: rubble cell length + margin
+    curtain_distance_m: 1.5         # robot 0.61 m + curtain + margin (1.0 did not get fully through)
+    potholes_distance_m: 1.6        # pothole area + robot length (guess, adjust after a run)
+
+    # ---- Safety ----
+    max_tilt_deg: 25.0              # abort beyond this roll/pitch
+    settle_s: 1.0
+    progress_window_s: 6.0
+    min_progress_m: 0.10
+    backoff_speed: 0.08
+    backoff_s: 2.0
+    max_time_s: 45.0

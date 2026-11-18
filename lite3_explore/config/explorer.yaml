@@ -1,0 +1,44 @@
+frontier_explorer:
+  ros__parameters:
+    # Start with dry_run: true. The robot will NOT move; frontiers just appear
+    # in RViz (/exploration/frontiers) while you drive with the controller.
+    # Set to false only when SLAM + Nav2 work together and lite3_auto is on.
+    dry_run: true
+
+    global_frame: map
+    robot_frame: base_link
+    cmd_vel_topic: nav_cmd_vel   # twist_mux input, so the joystick (priority 100) can override
+    tick_hz: 5.0
+
+    # Starting gait (flat floor), sent once at start (live only). 0 = keep current gait.
+    # Terrain gaits are switched by special_obstacles when an obstacle is detected.
+    # Must match normal_gait_code in special.yaml (crossings switch back to it).
+    gait_code: 553714432            # 0x21010300 Flat Slow
+
+    # Opening 360 deg scan (skipped in dry run)
+    initial_spin: true       # look-around for the CAMERA; done by Nav2 spin (stops before hitting walls)
+    spin_speed: 0.5          # rad/s
+    spin_turns: 1.0
+
+    # Frontier detection
+    min_frontier_size_cells: 5   # ignore tiny gaps (5 cells at 5 cm = 25 cm)
+    free_max: 25                 # grid value <= this counts as free
+    occupied_min: 65             # grid value >= this counts as wall
+    goal_clearance_m: 0.40       # goal must be this far from walls (robot is 0.61 x 0.37 m)
+
+    # score = w_size * length_m - w_dist * distance_m + w_bias * bias
+    w_size: 1.0
+    w_dist: 1.0
+    w_bias: 3.0
+
+    # Never get stuck
+    time_limit_base_s: 20.0      # limit = base + per_m * distance
+    time_limit_per_m_s: 8.0
+    progress_window_s: 10.0      # must get min_progress_m closer in this time
+    min_progress_m: 0.3
+    recheck_period_s: 2.0
+    blacklist_radius_m: 0.6
+    backup_speed: 0.15           # m/s, recovery back-up
+    backup_time_s: 0.0           # 0 = no blind reversing (nothing checks for walls behind)
+    max_consecutive_failures: 3
+    done_after_empty_checks: 10  # 10 empty checks at 5 Hz = 2 s with no frontiers
