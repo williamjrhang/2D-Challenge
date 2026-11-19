@@ -1,8 +1,8 @@
 special_obstacles:
   ros__parameters:
     # ---- Topics: check with `ros2 topic list` on the robot ----
-    imu_topic: /imu/data            # TODO: real Lite3 IMU topic
-    odom_topics: [/leg_odom2, /odom]   # first fresh one is used; none -> walk by time
+    imu_topic: /imu/data            # checked 18/11: ~200 Hz
+    odom_topics: [/odom, /leg_odom2]   # /odom = Fast-LIO (odom_relay), doesn't slip -> first. First fresh one is used; none -> walk by time
     cmd_vel_topic: /nav_cmd_vel     # twist_mux input (joystick /joy_cmd_vel overrides). NEVER /cmd_vel
 
     # ---- Gait codes for /simple_cmd (0 = don't switch) ----
@@ -52,6 +52,12 @@ special_obstacles:
     rubble_distance_m: 1.2          # TODO: rubble cell length + margin
     curtain_distance_m: 1.5         # robot 0.61 m + curtain + margin (1.0 did not get fully through)
     potholes_distance_m: 1.6        # pothole area + robot length (guess, adjust after a run)
+    # Walk = measured distance to the obstacle + its length + tail_m (the *_distance_m above
+    # are the minimum). MEASURE the lengths along the walking direction (~1.02 m per cell).
+    rubble_length_m: 1.02
+    potholes_length_m: 1.02
+    curtain_length_m: 0.05
+    tail_m: 0.45                    # base_link -> robot tail (~0.3) + margin
 
     # ---- Safety ----
     max_tilt_deg: 25.0              # abort beyond this roll/pitch

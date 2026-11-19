@@ -23,6 +23,7 @@ Topics
 """
 
 import json
+import math
 import os
 
 for _v in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
@@ -37,6 +38,7 @@ cv2.setNumThreads(1)
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage
@@ -71,9 +73,13 @@ class ObstacleDetector(Node):
         # YOLO-World text prompts and which kind each one means (same length lists).
         # No 'person' by default: YOLO-World also finds the real people around the arena
         # (tested: it boxed lab students behind the walls). Survivors are left to the VLM.
+        # No YOLO rubble prompts: the whole arena is OSB wood and they fired everywhere;
+        # rubble comes from the depth floor check. 'wall' prompts are DECOYS: with
+        # agnostic_nms a wall box wins over a weaker 'curtain' box on the same wall, and
+        # 'wall' itself never triggers anything.
         p('prompts', ['metal staircase', 'stairs with handrails', 'white fabric curtain',
-                      'cloth curtain in a doorway', 'uneven wooden floor', 'pile of rubble'])
-        p('kinds', ['stairs', 'stairs', 'curtain', 'curtain', 'rubble', 'rubble'])
+                      'cloth curtain in a doorway', 'plain wooden wall', 'white wall panel'])
+        p('kinds', ['stairs', 'stairs', 'curtain', 'curtain', 'wall', 'wall'])
         # CPU budget (live 17/11: default torch used all cores -> load 14/10, the robot data
         # bridge, twist_mux and Fast-LIO starved and the robot stopped responding).
         p('threads', 2)                  # CPU cores YOLO may use
@@ -89,7 +95,7 @@ class ObstacleDetector(Node):
         # pixels, blocking points at 0.36 m). Wood is brown (high saturation) -> no trigger.
         p('white_curtain_check', True)
         p('white_frac', 0.70)            # share of low-saturation pixels in the image centre
-        p('white_block_dist_m', 0.8)     # something blocking within this distance
+        p('white_block_dist_m', 0.7)     # something blocking within this distance
         p('white_block_points', 2000)
         # Wall vs curtain (live 18/11: pale wood walls triggered 'curtain' 3x and the robot
         # walked into them). A curtain is fabric with folds; a wall is flat. Every curtain
@@ -100,6 +106,8 @@ class ObstacleDetector(Node):
         p('curtain_min_wrinkle_mm', 2.5)
         p('rate_hz', 2.0)
         p('trigger_distance_m', 1.2)     # obstacle closer than this ...
+        p('curtain_trigger_m', 0.7)      # curtain: only this close, and only with depth
+        p('sighting_range_m', 3.0)       # report obstacles seen this far away (for APPROACH)
         p('path_half_width_m', 0.5)      # ... and within this of the robot's centre line
         p('person_distance_m', 3.0)
         p('confirm_frames', 3)
@@ -137,6 +145,9 @@ class ObstacleDetector(Node):
         # Nearest wall (>= 20 cm tall) in the robot's path from depth, every frame, also while
         # crossing: special_obstacles stops rubble / pothole crossings before a wall. -1 = none.
         self.wall_pub = self.create_publisher(Float32, '/perception/wall_ahead', 10)
+        # Stairs / curtain / rubble seen up to sighting_range_m away, with map position, so
+        # mission_controller can drive there on purpose (APPROACH mode).
+        self.seen_pub = self.create_publisher(String, '/perception/obstacle_seen', 10)
         self.img_pub = self.create_publisher(CompressedImage,
                                              '/perception/obstacle_image/compressed', 2)
 
@@ -218,7 +229,8 @@ class ObstacleDetector(Node):
         snap = self.locator.snapshot()
         pose = snap['pose'] if snap else self.locator.robot_pose()
         low = min(self.P['conf'], self.P['closeup_conf'])
-        r = self.model.predict(img, imgsz=self.P['imgsz'], conf=low, verbose=False)[0]
+        r = self.model.predict(img, imgsz=self.P['imgsz'], conf=low, verbose=False,
+                               agnostic_nms=True)[0]
 
         dets, seen = [], set()
         for box, cls, conf in zip(r.boxes.xyxy.tolist(), r.boxes.cls.tolist(), r.boxes.conf.tolist()):
@@ -234,14 +246,17 @@ class ObstacleDetector(Node):
             if xy is not None and pose is not None:
                 fwd, left = self.locator.to_robot(xy, pose)
                 d.update(forward_m=round(fwd, 2), left_m=round(left, 2), located_by='depth')
-                close = 0.0 < fwd <= (self.P['person_distance_m'] if kind == 'person'
-                                      else self.P['trigger_distance_m'])
+                self.report_sighting(kind, fwd, left)
+                limit = (self.P['person_distance_m'] if kind == 'person'
+                         else self.P['curtain_trigger_m'] if kind == 'curtain'
+                         else self.P['trigger_distance_m'])
+                close = 0.0 < fwd <= limit
                 in_path = kind == 'person' or abs(left) <= self.P['path_half_width_m']
             else:
                 # No depth: near the bottom-centre of the image means close and ahead.
                 cx = (box[0] + box[2]) / 2
                 d['located_by'] = 'image'
-                close = box[3] > 0.85 * h
+                close = box[3] > 0.85 * h and kind != 'curtain'   # curtain needs depth
                 in_path = w / 3 < cx < 2 * w / 3
             d['trigger'] = bool(close and in_path)
             dets.append(d)
@@ -273,6 +288,8 @@ class ObstacleDetector(Node):
         depth_kind, depth_stats = None, {}
         if self.P['use_floor_check'] and snap is not None:
             kind, dist, stats = self.floor_check(snap)
+            if kind == 'rubble' and dist is not None:
+                self.report_sighting('rubble', dist + 0.3, 0.0)   # +0.3: middle of the rubble
             depth_kind, depth_stats = kind, stats
             if 'bump' in stats:
                 self.get_logger().info(
@@ -342,6 +359,8 @@ class ObstacleDetector(Node):
                 self.send(kind, dets)
 
         self.dets_pub.publish(String(data=json.dumps(dets)))
+        if self.img_pub.get_subscription_count() == 0:
+            return                       # nobody watching: skip the JPEG encode (CPU)
         ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if ok:
             out = CompressedImage(format='jpeg', data=buf.tobytes())
@@ -401,12 +420,36 @@ class ObstacleDetector(Node):
         return classify(pts, self.floor_z, half_width=self.P['floor_half_width_m'],
                         wall_min=self.P['wall_min_m'])
 
+    def to_map(self, fwd, left):
+        """base_link point -> (map x, map y, robot x, robot y), or None without SLAM."""
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_link', Time())
+        except TransformException:
+            return None
+        q = t.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        rx, ry = t.transform.translation.x, t.transform.translation.y
+        c, s = math.cos(yaw), math.sin(yaw)
+        return rx + c * fwd - s * left, ry + s * fwd + c * left, rx, ry
+
+    def report_sighting(self, kind, fwd, left):
+        if not self.P['publish_events'] or kind not in ('stairs', 'curtain', 'rubble'):
+            return
+        if not 0.0 < fwd <= self.P['sighting_range_m']:
+            return
+        m = self.to_map(fwd, left)
+        if m is None:
+            return
+        self.seen_pub.publish(String(data=json.dumps(
+            {'kind': kind, 'x': round(m[0], 2), 'y': round(m[1], 2),
+             'rx': round(m[2], 2), 'ry': round(m[3], 2)})))
+
     def send(self, kind, dets):
         now = time.monotonic()
         if now - self.last_event.get(kind, -1e9) < self.P['cooldown_s']:
             return
         best = max((d for d in dets if d['kind'] == kind), key=lambda d: d['conf'])
-        active = self.mission_state in (None, 'EXPLORE', 'GO_TO_EXIT')
+        active = self.mission_state in (None, 'EXPLORE', 'GO_TO_EXIT', 'APPROACH')
         will = self.P['publish_events'] and active
         if will:
             # Start the cooldown only when the event is really sent: an event dropped while

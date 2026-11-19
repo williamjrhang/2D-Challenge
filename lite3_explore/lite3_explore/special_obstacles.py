@@ -22,6 +22,7 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
    tilt on a step, safe tilt limit, how slow is safe, how far to walk.
 """
 
+import json
 import math
 
 from lite3_explore.gait import GAIT_COMMAND_QOS, send_gait
@@ -111,6 +112,13 @@ class SpecialObstacles(Node):
         p('rubble_distance_m', 1.2)          # TODO: size of a rubble cell + margin
         p('curtain_distance_m', 1.0)         # TODO: curtain depth + robot length
         p('potholes_distance_m', 1.6)        # pothole area + robot length
+        # Walk distance = measured distance to the obstacle + its length + the robot's tail,
+        # so a crossing that starts 1.2 m before the rubble does not stop on top of it. The
+        # *_distance_m values above act as the minimum.
+        p('rubble_length_m', 1.02)           # MEASURE: rubble depth along the walking direction
+        p('potholes_length_m', 1.02)         # MEASURE
+        p('curtain_length_m', 0.05)
+        p('tail_m', 0.45)                    # base_link -> robot tail (~0.3) + margin
 
         # Safety
         p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
@@ -133,6 +141,10 @@ class SpecialObstacles(Node):
         # Wall ahead from the depth camera (obstacle_detector). Rubble / pothole crossings
         # walk straight by distance and must not walk into a wall behind the cell.
         self.wall = None                     # (time, distance m)
+        # Last detections from obstacle_detector (forward_m of what triggered the crossing).
+        self.last_dets = None                # (time, detections)
+        self.create_subscription(String, '/perception/obstacles', self.on_dets, 10)
+        self.walk_m = 0.0
         self.create_subscription(Float32, '/perception/wall_ahead',
                                  lambda m: setattr(self, 'wall', (self.now_s(), m.data)), 10)
         self.create_subscription(Imu, self.P['imu_topic'], self.on_imu, qos_profile_sensor_data)
@@ -197,9 +209,30 @@ class SpecialObstacles(Node):
         else:
             self.get_logger().info(f'Using odometry {self.odom_src}')
         self.kind = cmd
+        if cmd != 'stairs':
+            self.walk_m = self.P[f'{cmd}_distance_m']
+            dist = self.measured_distance(cmd)
+            if dist is not None:
+                self.walk_m = max(self.walk_m,
+                                  dist + self.P[f'{cmd}_length_m'] + self.P['tail_m'])
+            self.get_logger().info(f'{cmd}: starts {dist} m ahead -> walk {self.walk_m:.2f} m')
         self.start_time = self.now_s()
         self.get_logger().info(f'Starting {cmd} crossing.')
         self.set_phase('SETTLE')
+
+    def on_dets(self, msg):
+        try:
+            self.last_dets = (self.now_s(), json.loads(msg.data))
+        except ValueError:
+            pass
+
+    def measured_distance(self, kind):
+        """Distance to the obstacle that triggered this crossing, or None."""
+        if self.last_dets is None or self.now_s() - self.last_dets[0] > 2.0:
+            return None
+        d = [x['forward_m'] for x in self.last_dets[1]
+             if x.get('kind') == kind and x.get('trigger') and 'forward_m' in x]
+        return min(d) if d else None
 
     def on_imu(self, msg):
         self.roll, self.pitch, _ = quat_to_rpy(msg.orientation)
@@ -443,7 +476,7 @@ class SpecialObstacles(Node):
                 elif (now - self.level_since > self.P['level_hold_s']
                       and dist(self.P['stairs_min_distance_m'])):
                     self.finish('success')
-        elif dist(self.P[f'{self.kind}_distance_m']):
+        elif dist(self.walk_m):
             self.finish('success')
 
     def do_abort(self):

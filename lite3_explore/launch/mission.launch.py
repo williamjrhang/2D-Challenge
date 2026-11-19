@@ -2,6 +2,7 @@
 
   ros2 launch lite3_explore mission.launch.py                 # explorer in DRY RUN
   ros2 launch lite3_explore mission.launch.py live:=true      # robot drives itself
+  ros2 launch lite3_explore mission.launch.py live:=true publish_obstacles:=true   # FULL RUN
 """
 import os
 
@@ -40,6 +41,6 @@ def generate_launch_description():
         node('vlm_watcher', [{'mission_file': mission}],
              IfCondition(LaunchConfiguration('use_vlm'))),
         node('qr_reader', [], IfCondition(LaunchConfiguration('use_qr'))),
-        node('obstacle_detector', [{'publish_events': PythonExpression(["'", LaunchConfiguration('publish_obstacles'), "' == 'true'"])}],
+        node('obstacle_detector', [os.path.join(cfg, 'obstacle.yaml'), {'publish_events': PythonExpression(["'", LaunchConfiguration('publish_obstacles'), "' == 'true'"])}],
              IfCondition(LaunchConfiguration('use_yolo'))),
     ])

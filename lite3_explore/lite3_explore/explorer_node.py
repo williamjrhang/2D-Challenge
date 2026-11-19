@@ -90,6 +90,13 @@ class FrontierExplorer(Node):
         p('backup_time_s', 2.0)
         p('max_consecutive_failures', 3)
         p('done_after_empty_checks', 10) # no frontiers this many times in a row -> done
+        # Arena box in the map frame [xmin, ymin, xmax, ymax]; frontiers outside are ignored
+        # (open walls / the final cell's missing wall let the lidar map the lab). [] = off.
+        p('bounds', [0.0])
+        # Look-around after reaching a goal, so the camera sees side walls (QR codes are on
+        # the left/right walls of rooms). 0 = off. Only if this far from the last one.
+        p('goal_spin_deg', 0.0)
+        p('goal_spin_min_gap_m', 2.0)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -100,7 +107,11 @@ class FrontierExplorer(Node):
             'min_progress_m', 'recheck_period_s', 'blacklist_radius_m',
             'backup_speed', 'backup_time_s', 'max_consecutive_failures',
             'done_after_empty_checks', 'gait_code', 'gait_via_manual',
+            'bounds', 'goal_spin_deg', 'goal_spin_min_gap_m',
         ]}
+        b = [float(v) for v in (self.P['bounds'] or [])]
+        self.bounds = b if len(b) == 4 else None     # [0.0] / [] in yaml = off
+        self.last_spin_xy = None
 
         # ---------------- ROS interfaces ----------------
         map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -345,6 +356,10 @@ class FrontierExplorer(Node):
             occupied_min=self.P['occupied_min'],
             clearance_m=self.P['goal_clearance_m'],
         )
+        if self.bounds is not None:
+            xmin, ymin, xmax, ymax = self.bounds
+            frontiers = [f for f in frontiers
+                         if xmin <= f.goal_xy[0] <= xmax and ymin <= f.goal_xy[1] <= ymax]
         ranked = score_frontiers(
             frontiers, robot_xy=pose[:2],
             w_size=self.P['w_size'], w_dist=self.P['w_dist'], w_bias=self.P['w_bias'],
@@ -392,6 +407,20 @@ class FrontierExplorer(Node):
                 # Don't come straight back if this spot is still a frontier (e.g. glass).
                 if self.goal_is_frontier:
                     self.blacklist.append(self.goal_xy)
+                # Look-around in a new area (collision-checked Nav2 spin) so the VLM and the
+                # QR reader see the side walls.
+                if (self.P['goal_spin_deg'] > 0 and pose is not None
+                        and (self.last_spin_xy is None
+                             or math.hypot(pose[0] - self.last_spin_xy[0],
+                                           pose[1] - self.last_spin_xy[1])
+                             >= self.P['goal_spin_min_gap_m'])):
+                    angle = math.radians(self.P['goal_spin_deg'])
+                    limit = angle / max(self.P['spin_speed'], 1e-3) + 10.0
+                    if self.nav.spin(spin_dist=angle, time_allowance=int(limit)):
+                        self.last_spin_xy = pose[:2]
+                        self.state_end = self.now_s() + limit + 5.0
+                        self.set_state('SPIN')       # do_spin goes back to SELECT when done
+                        return
                 self.set_state('SELECT')
             else:
                 self.blacklist_goal(f'Nav2 result {result}')

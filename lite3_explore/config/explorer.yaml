@@ -7,7 +7,7 @@ frontier_explorer:
 
     global_frame: map
     robot_frame: base_link
-    cmd_vel_topic: nav_cmd_vel   # twist_mux input, so the joystick (priority 100) can override
+    cmd_vel_topic: /nav_cmd_vel  # twist_mux input, so the joystick (priority 100) can override
     tick_hz: 5.0
 
     # Starting gait (flat floor), sent once at start (live only). 0 = keep current gait.
@@ -25,7 +25,7 @@ frontier_explorer:
     min_frontier_size_cells: 5   # ignore tiny gaps (5 cells at 5 cm = 25 cm)
     free_max: 25                 # grid value <= this counts as free
     occupied_min: 65             # grid value >= this counts as wall
-    goal_clearance_m: 0.40       # goal must be this far from walls (robot is 0.61 x 0.37 m)
+    goal_clearance_m: 0.30       # goal must be this far from walls (robot is 0.61 x 0.37 m; 0.40 dropped frontiers in ~1 m corridors)
 
     # score = w_size * length_m - w_dist * distance_m + w_bias * bias
     w_size: 1.0
@@ -42,4 +42,14 @@ frontier_explorer:
     backup_speed: 0.15           # m/s, recovery back-up
     backup_time_s: 0.0           # 0 = no blind reversing (nothing checks for walls behind)
     max_consecutive_failures: 3
-    done_after_empty_checks: 10  # 10 empty checks at 5 Hz = 2 s with no frontiers
+    done_after_empty_checks: 50  # 50 empty checks at 5 Hz = 10 s with no frontiers (2 s ended runs early)
+
+    # Arena box in the MAP frame [xmin, ymin, xmax, ymax] (+ ~0.3 m margin); frontiers outside
+    # are ignored. Map origin = start pose, +x = start forward, +y = left. [0.0] = off.
+    # MEASURE on the day (layout changes on 27 Nov). Write decimals: [-0.6, -3.4, 5.5, 0.6]
+    bounds: [0.0]
+
+    # Look-around after reaching a goal >= goal_spin_min_gap_m from the last one, so the
+    # camera sees side walls (QR codes). 360 deg at 0.5 rad/s ~ 13 s; 180 if time is tight.
+    goal_spin_deg: 360.0
+    goal_spin_min_gap_m: 2.0

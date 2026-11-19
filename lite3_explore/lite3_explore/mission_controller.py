@@ -32,13 +32,16 @@ You can test all of this WITHOUT perception, by publishing the inputs by hand
 (see README).
 """
 
+import json
 import math
 
 import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from lite3_explore.mission_config import Arena, load_mission
 
@@ -73,10 +76,20 @@ class MissionController(Node):
                                             # else 'stop' exits AI mode on the steps
         p('exit_timeout_s', 120.0)
         p('look_cooldown_s', 5.0)           # ignore new look events right after a look
+        # APPROACH: drive on purpose to obstacles the camera saw (the lidar sees the curtain /
+        # rubble as a wall, so there is no frontier behind them).
+        p('approach_kinds', ['stairs', 'curtain', 'rubble'])  # remove 'stairs' to never go to stairs
+        p('approach_min_sightings', 3)     # seen this many times before we drive there
+        p('approach_merge_m', 0.8)         # sightings closer than this = same obstacle
+        p('approach_standoff_m', 0.6)      # stop this far before it (base_link; nose is ~0.3 m ahead)
+        p('approach_timeout_s', 40.0)
+        p('approach_wait_s', 6.0)          # wait this long at the spot for the close-range trigger
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'global_frame', 'tick_hz', 'investigate_timeout_s',
-            'traverse_timeout_s', 'exit_timeout_s', 'look_cooldown_s', 'look_every_s']}
+            'traverse_timeout_s', 'exit_timeout_s', 'look_cooldown_s', 'look_every_s',
+            'approach_kinds', 'approach_min_sightings', 'approach_merge_m',
+            'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -90,6 +103,9 @@ class MissionController(Node):
         self.create_subscription(Bool, '/exploration/done', self.on_explore_done, 10)
         self.create_subscription(Bool, '/mission/tasks_done', self.on_tasks_done, 10)
         self.create_subscription(PointStamped, '/mission/exit_pose', self.on_exit_pose, 10)
+        self.create_subscription(String, '/perception/obstacle_seen', self.on_obstacle_seen, 10)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # ---- outputs ----
         self.explore_pub = self.create_publisher(Bool, '/exploration/enable', 10)
@@ -124,7 +140,13 @@ class MissionController(Node):
         self.out_of_time = False
         self.last_look_end = self.now_s()
         self.last_special_end = -1e9
+        self.last_special_kind = None
         self.exit_goal_sent = False
+        self.obstacles = []          # {kind, x, y, rx, ry, n, status: new | done | failed}
+        self.target = None
+        self.approach_sent = False
+        self.arrived_at = None
+        self.traverse_xy = None
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
         self.enter('EXPLORE')
@@ -134,12 +156,15 @@ class MissionController(Node):
     def on_event(self, msg):
         event = msg.data.strip()
         if event in SPECIAL_EVENTS:
-            # Ignore while already crossing (detector keeps firing on the obstacle)
-            # and just after a crossing, else the robot would cross it again.
-            if self.state == 'TRAVERSE' or self.now_s() - self.last_special_end < 10.0:
+            # Ignore while already crossing (detector keeps firing on the obstacle) and,
+            # just after a crossing, the SAME kind only (else it would cross it again). A
+            # different terrain right behind it is crossed in its own gait.
+            kind = SPECIAL_EVENTS[event]
+            recent = self.now_s() - self.last_special_end < 10.0
+            if self.state == 'TRAVERSE' or (recent and kind == self.last_special_kind):
                 return
-            self.pending_special = SPECIAL_EVENTS[event]
-            self.get_logger().info(f'Event: {event} -> will traverse {self.pending_special}')
+            self.pending_special = kind
+            self.get_logger().info(f'Event: {event} -> will traverse {kind}')
         elif event in LOOK_EVENTS:
             if self.now_s() - self.last_look_end > self.P['look_cooldown_s']:
                 self.pending_look = True
@@ -165,6 +190,51 @@ class MissionController(Node):
         self.exit_xy = (msg.point.x, msg.point.y)
         self.get_logger().info(f'Exit at ({msg.point.x:.2f}, {msg.point.y:.2f})')
 
+    def on_obstacle_seen(self, msg):
+        try:
+            s = json.loads(msg.data)
+        except ValueError:
+            return
+        if s.get('kind') not in self.P['approach_kinds']:
+            return
+        for o in self.obstacles:
+            if (o['kind'] == s['kind']
+                    and math.hypot(o['x'] - s['x'], o['y'] - s['y']) < self.P['approach_merge_m']):
+                if o['status'] == 'new':
+                    k = o['n']
+                    o['x'] = (o['x'] * k + s['x']) / (k + 1)
+                    o['y'] = (o['y'] * k + s['y']) / (k + 1)
+                    o['rx'], o['ry'] = s['rx'], s['ry']
+                    o['n'] = k + 1
+                return
+        self.obstacles.append({**s, 'n': 1, 'status': 'new'})
+        self.get_logger().info(f'Obstacle seen: {s["kind"]} at ({s["x"]:.2f}, {s["y"]:.2f})')
+
+    def robot_xy(self):
+        try:
+            t = self.tf_buffer.lookup_transform(self.P['global_frame'], 'base_link', Time())
+        except TransformException:
+            return None
+        return t.transform.translation.x, t.transform.translation.y
+
+    def pick_target(self):
+        if self.nav is None or self.out_of_time:
+            return None
+        here = self.robot_xy()
+        cands = [o for o in self.obstacles
+                 if o['status'] == 'new' and o['n'] >= self.P['approach_min_sightings']]
+        if not cands or here is None:
+            return None
+        return min(cands, key=lambda o: math.hypot(o['x'] - here[0], o['y'] - here[1]))
+
+    def mark_obstacles(self, kind, xy, status, radius=2.0):
+        if xy is None:
+            return
+        for o in self.obstacles:
+            if (o['kind'] == kind and o['status'] == 'new'
+                    and math.hypot(o['x'] - xy[0], o['y'] - xy[1]) < radius):
+                o['status'] = status
+
     # ================= helpers =================
 
     def now_s(self):
@@ -185,8 +255,12 @@ class MissionController(Node):
         self.explore_pub.publish(Bool(data=(state == 'EXPLORE')))
 
         if state == 'TRAVERSE':
+            self.traverse_xy = self.robot_xy()
             self.special_result = None
             self.special_pub.publish(String(data=self.current_special))
+        elif state == 'APPROACH':
+            self.approach_sent = False
+            self.arrived_at = None
         elif state == 'INVESTIGATE':
             self.look_done = False
             self.look_pub.publish(Bool(data=True))
@@ -202,14 +276,15 @@ class MissionController(Node):
         elapsed = self.now_s() - self.start_time
         if (self.time_limit > 0 and not self.out_of_time
                 and elapsed > self.time_limit - self.exit_margin
-                and self.state in ('EXPLORE', 'INVESTIGATE')):
+                and self.state in ('EXPLORE', 'INVESTIGATE', 'APPROACH')):
             self.out_of_time = True
             self.get_logger().warn(f'{elapsed:.0f} s used: time to head for the final cell.')
+            self.cancel_nav()
             self.enter('GO_TO_EXIT')
             return
 
-        # Priority 1 and 2 can interrupt EXPLORE (and GO_TO_EXIT).
-        if self.state in ('EXPLORE', 'GO_TO_EXIT'):
+        # Priority 1 and 2 can interrupt EXPLORE (and GO_TO_EXIT, APPROACH).
+        if self.state in ('EXPLORE', 'GO_TO_EXIT', 'APPROACH'):
             if self.pending_special:
                 self.current_special = self.pending_special
                 self.pending_special = None
@@ -224,6 +299,13 @@ class MissionController(Node):
         getattr(self, f'do_{self.state.lower()}')()
 
     def do_explore(self):
+        target = self.pick_target()
+        if target is not None:
+            self.target = target
+            self.get_logger().info(
+                f'Going to {target["kind"]} at ({target["x"]:.2f}, {target["y"]:.2f})')
+            self.enter('APPROACH')
+            return
         if not (self.tasks_done or self.explore_done):
             # Stop now and then so the scene VLM can name the room / spot hazards.
             if (self.P['look_every_s'] > 0
@@ -238,6 +320,49 @@ class MissionController(Node):
             # Tasks done but exit not seen yet: keep exploring until perception finds it.
             self.get_logger().info('Tasks done, still looking for the exit.')
             self.waiting_for_exit = True
+
+    def do_approach(self):
+        from nav2_simple_commander.robot_navigator import TaskResult
+        o = self.target
+        if self.time_in_state() < 1.0:        # let the explorer cancel its own goal first
+            return
+        if not self.approach_sent:
+            dx, dy = o['x'] - o['rx'], o['y'] - o['ry']
+            d = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / d, dy / d               # direction we first saw it from
+            sx = self.P['approach_standoff_m']
+            goal = PoseStamped()
+            goal.header.frame_id = self.P['global_frame']
+            goal.header.stamp = self.nav.get_clock().now().to_msg()
+            goal.pose.position.x = o['x'] - sx * ux
+            goal.pose.position.y = o['y'] - sx * uy
+            yaw = math.atan2(uy, ux)              # face the obstacle
+            goal.pose.orientation.z = math.sin(yaw / 2)
+            goal.pose.orientation.w = math.cos(yaw / 2)
+            if self.nav.goToPose(goal) is False:
+                return self.approach_failed('Nav2 rejected the goal')
+            self.approach_sent = True
+            return
+        if self.arrived_at is None:
+            if self.nav.isTaskComplete():
+                result = self.nav.getResult()
+                if result != TaskResult.SUCCEEDED:
+                    return self.approach_failed(f'Nav2 result {result}')
+                self.arrived_at = self.now_s()
+                self.get_logger().info(f'At the {o["kind"]}, waiting for the close-range check.')
+            elif self.time_in_state() > self.P['approach_timeout_s']:
+                self.cancel_nav()
+                return self.approach_failed('timed out')
+            return
+        # Standing in front of it: the detector should fire -> tick() switches to TRAVERSE.
+        if self.now_s() - self.arrived_at > self.P['approach_wait_s']:
+            self.approach_failed('not confirmed up close (false detection?)')
+
+    def approach_failed(self, why):
+        self.get_logger().warn(f'Approach to {self.target["kind"]} failed: {why}')
+        self.target['status'] = 'failed'
+        self.target = None
+        self.enter('EXPLORE')
 
     def do_investigate(self):
         if self.look_done:
@@ -261,9 +386,16 @@ class MissionController(Node):
         else:
             return
         self.last_special_end = self.now_s()
+        self.last_special_kind = self.current_special
+        ok = self.special_result == 'success'
+        self.mark_obstacles(self.current_special, self.traverse_xy, 'done' if ok else 'failed')
+        if self.target is not None and self.target['kind'] == self.current_special:
+            self.target['status'] = 'done' if ok else 'failed'
+        self.target = None
         # A new area may be open now (e.g. top of the stairs), so explore again.
+        # Out of time: keep heading for the exit (the time check only fires once).
         self.explore_done = False
-        self.enter('EXPLORE')
+        self.enter('GO_TO_EXIT' if self.out_of_time else 'EXPLORE')
 
     def do_go_to_exit(self):
         if self.exit_xy is None:
@@ -302,7 +434,10 @@ class MissionController(Node):
         pass
 
     def cancel_nav(self):
-        if self.nav is not None and self.state == 'GO_TO_EXIT' and self.exit_goal_sent:
+        if self.nav is None:
+            return
+        if ((self.state == 'GO_TO_EXIT' and self.exit_goal_sent)
+                or (self.state == 'APPROACH' and self.approach_sent)):
             self.nav.cancelTask()
 
 
