@@ -86,7 +86,8 @@ class SpecialObstacles(Node):
         p('stairs_use_ai_mode', True)
         p('ai_enter_code', 553714984)        # 0x21010528 Enter AI
         p('ai_exit_code', 553714987)         # 0x2101052B Exit AI
-        # Gait codes are ignored in AUTO mode (live 18/11): switch manual -> gait -> auto.
+        # Fallback only: true = switch manual -> gait -> auto. Gait codes DO work in auto
+        # mode; on 18/11 they were dropped by a /simple_cmd QoS mismatch (fixed in gait.py).
         p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
