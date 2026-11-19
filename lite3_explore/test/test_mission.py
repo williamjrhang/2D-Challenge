@@ -57,3 +57,61 @@ def test_opencv_reads_a_qr_code():
     img = cv2.copyMakeBorder(img, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
     text, pts, _ = cv2.QRCodeDetector().detectAndDecode(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
     assert text == 'Survivor hidden in kitchen'
+
+
+# ---------------- booklet (v5.1) alignment ----------------
+import os
+
+import yaml
+
+from lite3_explore.mission_config import make_report, pick_task_id
+
+REAL = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'config', 'mission.yaml')))
+
+
+def test_booklet_coordinates():
+    a = Arena(REAL)                                   # start cell centre = (0, 0), 1.02 m cells
+    assert a.map_to_cell_centre(0.1, -0.2) == (0.0, 0.0)
+    assert a.map_to_cell_centre(2.2, 0.9) == (2.04, 1.02)
+    assert a.map_to_cell_centre(3.0, 2.4) == (3.06, 2.04)
+
+
+def test_booklet_vocabulary():
+    assert REAL['scene_types'] == ['kitchen', 'market', 'workshop', 'clinic', 'cleaning_room']
+    assert set(REAL['hazard_labels']) == {'high_voltage', 'radioactive', 'chemical',
+                                          'biological', 'flammable'}
+    assert set(REAL['object_labels']) == {'medical_kit', 'hand_tools', 'food', 'water', 'utensils'}
+
+
+def test_report_fields_follow_booklet():
+    r, problem = make_report(REAL, {'task_type': 'survivor', 'label': 'survivor',
+                                    'scene_type': 'kitchen'}, (2.04, 3.06))
+    assert problem is None and r['label'] == '' and r['pos'] == [2.04, 3.06] and r['message'] == ''
+    r, problem = make_report(REAL, {'task_type': 'qr', 'label': '', 'scene_type': 'unknown',
+                                    'message': 'My friend is in the market.'}, (1.0, 1.0))
+    assert problem is None and r['pos'] is None and r['scene_type'] == ''
+    assert r['message'] == 'My friend is in the market.'
+    _, problem = make_report(REAL, {'task_type': 'hazard', 'label': 'biohazard',
+                                    'scene_type': 'clinic'}, (0, 0))
+    assert problem                                    # not an allowed label -> not sent
+    _, problem = make_report(REAL, {'task_type': 'survivor', 'scene_type': 'unknown'}, (0, 0))
+    assert problem                                    # room unknown -> cannot score
+
+
+def test_task_ids_m01_to_m05():
+    ids, used = REAL['task_ids'], set()
+
+    def tid(**kw):
+        r, _ = make_report(REAL, kw, (0, 0))
+        t = pick_task_id(ids, r, used)
+        if t:
+            used.add(t)
+        return t
+    assert tid(task_type='object', label='food', scene_type='kitchen') is None
+    assert tid(task_type='object', label='medical_kit', scene_type='clinic') == 'M01'
+    assert tid(task_type='object', label='medical_kit', scene_type='clinic') is None  # sent once
+    assert tid(task_type='hazard', label='high_voltage', scene_type='kitchen') == 'M02'
+    assert tid(task_type='survivor', scene_type='market') == 'M05'
+    assert tid(task_type='survivor', scene_type='kitchen') == 'M03'
+    assert tid(task_type='survivor', scene_type='clinic') is None                    # both used
+    assert tid(task_type='qr', message='hi') == 'M04'

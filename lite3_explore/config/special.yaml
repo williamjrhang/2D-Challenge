@@ -24,6 +24,9 @@ special_obstacles:
     # ONLY for stairs: enter at most 1 cell before, exit at most 1 cell after.
     # AI mode on any other terrain = no points for it. No jumps / stunts.
     stairs_use_ai_mode: true
+    # false = send gait codes directly (worked in auto mode for potholes on 17/11).
+    # true  = code flips manual -> gait -> auto in 0.6 s (fallback, only if direct fails).
+    gait_via_manual: false
     ai_enter_code: 553714984        # 0x21010528 Enter AI
     ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
     stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
@@ -58,3 +61,4 @@ special_obstacles:
     backoff_speed: 0.08
     backoff_s: 2.0
     max_time_s: 45.0
+    wall_stop_m: 0.45               # rubble/potholes crossing stops when a wall is this close (depth)

@@ -115,7 +115,11 @@ class MissionController(Node):
         self.explore_done = False
         self.tasks_done = False
         # Final cell from mission.yaml (arena coords) -> map. /mission/exit_pose can override.
-        self.exit_xy = self.arena.arena_to_map(*self.arena.final)
+        self.exit_xy = (self.arena.arena_to_map(*self.arena.final)
+                        if self.arena.final is not None else None)
+        if self.exit_xy is None:
+            self.get_logger().warn('final_cell_centre not set: robot will explore and then '
+                                   'stop where it is (no drive to a final cell).')
         self.start_time = self.now_s()
         self.out_of_time = False
         self.last_look_end = self.now_s()

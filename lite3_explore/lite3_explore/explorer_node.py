@@ -39,6 +39,7 @@ try:  # Lite3 custom message for /simple_cmd (gait switching)
 except ImportError:
     MotionSimpleCMD = None
 
+from lite3_explore.gait import GAIT_COMMAND_QOS, send_gait
 from lite3_explore.frontiers import (
     MapInfo, find_frontiers, score_frontiers, still_frontier,
 )
@@ -61,6 +62,7 @@ class FrontierExplorer(Node):
         p('cmd_vel_topic', '/nav_cmd_vel')  # twist_mux input, never /cmd_vel
         p('tick_hz', 5.0)
         p('gait_code', 0)                # gait to use for the whole run (0 = don't switch)
+        p('gait_via_manual', False)      # true = fallback: manual -> gait -> auto
 
         p('initial_spin', True)          # Nav2 look-around spin at start (collision-checked)
         p('spin_speed', 0.5)             # rad/s
@@ -97,7 +99,7 @@ class FrontierExplorer(Node):
             'time_limit_base_s', 'time_limit_per_m_s', 'progress_window_s',
             'min_progress_m', 'recheck_period_s', 'blacklist_radius_m',
             'backup_speed', 'backup_time_s', 'max_consecutive_failures',
-            'done_after_empty_checks', 'gait_code',
+            'done_after_empty_checks', 'gait_code', 'gait_via_manual',
         ]}
 
         # ---------------- ROS interfaces ----------------
@@ -113,7 +115,7 @@ class FrontierExplorer(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/exploration/frontiers', 10)
         self.gait_pub = None
         if MotionSimpleCMD is not None:
-            self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', 10)
+            self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', GAIT_COMMAND_QOS)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -295,9 +297,8 @@ class FrontierExplorer(Node):
         self.start_exploring()
 
     def send_gait(self):
-        code = int(self.P['gait_code'])
-        self.gait_pub.publish(MotionSimpleCMD(cmd_code=code, type=0))
-        self.get_logger().info(f'Gait command sent: {hex(code)}')
+        send_gait(self.gait_pub, MotionSimpleCMD, self.P['gait_code'], self.get_logger(),
+                  via_manual=self.P['gait_via_manual'])
 
     def do_gait(self, pose):
         self.publish_cmd()

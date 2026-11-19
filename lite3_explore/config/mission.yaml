@@ -1,36 +1,51 @@
 # Competition-day settings, read by vlm_watcher, qr_reader, reporter and mission_controller.
 # Everything marked TODO must be filled in from the organisers' lists before the run.
 
-group_id: group05                 # plain group ID for now (works with the scene server, as in Lab 6).
-                                  # LATER, before competition day: change to the registered group05_XXXX.
+group_id: group05                 # TODO BEFORE COMPETITION: registered group05_XXXX (booklet F:
+                                  # same id for the scene server AND the scoring server).
 
 scene_server: http://192.168.10.141:8000/analyze
 report_server: http://192.168.10.141:8001/task_report
 send_reports: false               # false = only log what WOULD be sent. true on competition day.
 
-# ---- Arena coordinates (used for the "pos" field = centre of the arena cell) ----
-# Our SLAM map starts where the robot starts (map origin = start pose, x = robot forward).
-# Give the start cell centre and the robot's start heading in ARENA coordinates.
+# ---- Arena coordinates (booklet F, "Localization Reference Frame") ----
+# Origin (0, 0) = centre of the START cell, +x = robot's start forward, +y = robot's left.
+# Cell centres are 1.02 m apart. "pos" = centre of the cell containing the item.
+# The robot must start on the marked start pose, facing the marked direction.
 arena:
-  cell_size_m: 1.0                # TODO: grid cell size
-  start_cell_centre: [0.5, 0.5]   # TODO: arena (x, y) of the start cell centre
-  start_heading_deg: 0.0          # TODO: robot heading at start, in arena frame (0 = +x)
-  final_cell_centre: [5.5, 0.5]   # TODO: arena (x, y) of the final cell (end of ground run)
+  cell_size_m: 1.02
+  start_cell_centre: [0.0, 0.0]
+  start_heading_deg: 0.0          # arena +x = robot forward at start (booklet convention)
+  final_cell_centre: null         # PRACTICE: null = explore, then stop where it is.
+                                  # COMPETITION DAY: final cell (Drone Launch Area) of the new
+                                  # layout as [k*1.02, m*1.02], e.g. [3.06, 2.04]. Wrong value =
+                                  # robot drives to the wrong place at the end.
 
-# ---- Predefined answer lists (TODO: replace with the organisers' lists) ----
-scene_types: [clinic, kitchen, office, storage, control_room, corridor, unknown]
-hazard_labels: [radioactive, electrical, general_warning, magnetic_field, non_ionizing_radiation,
-                biohazard, laser, flood, optical_radiation, chemical]
-object_labels: [medical_kit, fire_extinguisher, food_supplies, water, first_aid_box]
+# ---- Fixed vocabulary (booklet F, page 11). Anything else -> submission REJECTED. ----
+scene_types: [kitchen, market, workshop, clinic, cleaning_room]
+hazard_labels: [high_voltage, radioactive, chemical, biological, flammable]
+object_labels: [medical_kit, hand_tools, food, water, utensils]
 
-# task_id for each report. Key "task_type" or "task_type:label". TODO: organisers' mission IDs.
-# Anything not listed gets an automatic id: survivor -> S01, S02 ..., hazard -> H01, object -> O01, qr -> Q01
-task_ids: {}
+# ---- task_id per report (booklet: M01..M05 are fixed) ----
+# Key, most specific first: "type:label@scene", "type:label", "type@scene", "type".
+# Value: one id, or a list (next unused id is taken). Each id is sent ONCE (the server keeps
+# only the LATEST submission, so we never let a later guess overwrite a good one).
+# Items that match no key are only logged.
+# COMPETITION DAY: update from the mission texts. Below = the booklet's example missions.
+task_ids:
+  "object:medical_kit": M01       # M01 find where medical equipment is
+  "hazard:high_voltage": M02      # M02 damaged electrical installation -> warning sign
+  "survivor@kitchen": M03         # M03 survivor in the room for food preparation
+  qr: M04                         # M04 first survivor's QR message
+  "survivor@market": M05          # M05 the other survivor (QR said: "friend is in the market")
+  survivor: [M03, M05]            # any other room: first free of M03 / M05
 
-# Stop exploring and head for the final cell when this much time is used (seconds).
-time_limit_s: 900                 # TODO: real run time limit
-exit_margin_s: 120                # leave this much time to reach the final cell
+# Run time (booklet D): 6 min per run INCLUDING the drone launch. Reaching the final cell
+# ends the timed ground run, so head there with enough time left.
+time_limit_s: 0                   # PRACTICE: 0 = no time limit. COMPETITION DAY: 360
+exit_margin_s: 120                # start heading to the final cell at 4:00
 
 # Expected number of each task; when all are reported -> /mission/tasks_done (leave early).
-# 0 = unknown (never counts as done).
+# 0 = unknown (never counts as done). Keep 0 if you want the obstacle points (stairs 20,
+# curtain 15, terrain 4x5) - leaving early skips unexplored obstacles.
 expected_counts: {survivor: 0, hazard: 0, object: 0, qr: 0}

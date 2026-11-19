@@ -24,6 +24,8 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
 
 import math
 
+from lite3_explore.gait import GAIT_COMMAND_QOS, send_gait
+
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -31,7 +33,7 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 
 try:  # Lite3 custom message (exists on the lab computer, used for /simple_cmd)
     from transfer_interfaces.msg import MotionSimpleCMD
@@ -83,6 +85,8 @@ class SpecialObstacles(Node):
         p('stairs_use_ai_mode', True)
         p('ai_enter_code', 553714984)        # 0x21010528 Enter AI
         p('ai_exit_code', 553714987)         # 0x2101052B Exit AI
+        # Gait codes are ignored in AUTO mode (live 18/11): switch manual -> gait -> auto.
+        p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
         p('stairs_speed', 0.10)
@@ -117,11 +121,20 @@ class SpecialObstacles(Node):
         p('backoff_speed', 0.08)
         p('backoff_s', 2.0)
         p('max_time_s', 45.0)                # whole crossing time limit
+        # Stop rubble / pothole crossings when a wall (depth, >= 20 cm tall) is this close to
+        # base_link (robot nose is ~0.3 m ahead of base_link). Not for curtain / stairs: the
+        # camera sees the curtain and the steps as walls.
+        p('wall_stop_m', 0.45)
 
         self.P = {name: self.get_parameter(name).value for name in names}
 
         # ---- ROS interfaces ----
         self.create_subscription(String, '/special/start', self.on_start, 10)
+        # Wall ahead from the depth camera (obstacle_detector). Rubble / pothole crossings
+        # walk straight by distance and must not walk into a wall behind the cell.
+        self.wall = None                     # (time, distance m)
+        self.create_subscription(Float32, '/perception/wall_ahead',
+                                 lambda m: setattr(self, 'wall', (self.now_s(), m.data)), 10)
         self.create_subscription(Imu, self.P['imu_topic'], self.on_imu, qos_profile_sensor_data)
         self.odom = {}                       # topic -> (time, xy, yaw)
         for topic in self.P['odom_topics']:
@@ -132,7 +145,7 @@ class SpecialObstacles(Node):
         self.state_pub = self.create_publisher(String, '/special/state', 10)
         self.gait_pub = None
         if MotionSimpleCMD is not None:
-            self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', 10)
+            self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', GAIT_COMMAND_QOS)
 
         # ---- memory ----
         self.roll = self.pitch = 0.0
@@ -234,8 +247,8 @@ class SpecialObstacles(Node):
         if self.gait_pub is None:
             self.get_logger().warn('transfer_interfaces not found, cannot switch gait.')
             return
-        self.gait_pub.publish(MotionSimpleCMD(cmd_code=int(code), type=0))
-        self.get_logger().info(f'Gait command sent: {hex(code)}')
+        send_gait(self.gait_pub, MotionSimpleCMD, code, self.get_logger(),
+                  via_manual=self.P['gait_via_manual'])
 
     def gait_code_for(self, kind):
         return self.P.get(f'{kind}_gait_code', 0)   # curtain has no special gait
@@ -340,12 +353,19 @@ class SpecialObstacles(Node):
             code = self.gait_code_for(self.kind)
             if code:
                 self.send_gait(code)
+                self.gait_resent = False
                 self.set_phase('GAIT')
             else:
                 self.begin_cross()
 
     def do_gait(self):
         self.stop_robot()
+        # Send the terrain gait a second time after 1 s, in case the first message was lost.
+        # Same code twice is harmless. Not for AI mode (enter AI only once).
+        if (not self.in_ai and not getattr(self, 'gait_resent', True)
+                and self.in_phase_s() >= 1.0):
+            self.send_gait(self.gait_code_for(self.kind))
+            self.gait_resent = True
         if self.in_phase_s() >= 2.0:   # give the robot time to change gait / enter AI
             self.begin_cross()
 
@@ -387,6 +407,14 @@ class SpecialObstacles(Node):
                 self.abort(f'only moved {moved:.2f} m in {self.P["progress_window_s"]:.0f} s')
                 return
             self.window_start, self.window_xy = now, self.xy
+
+        # Wall right ahead (rubble / potholes only): stop here, the cell is behind us.
+        if self.kind in ('rubble', 'potholes') and self.wall is not None \
+                and now - self.wall[0] < 1.5 and 0.0 < self.wall[1] < self.P['wall_stop_m']:
+            self.get_logger().warn(f'{self.kind}: wall {self.wall[1]:.2f} m ahead, '
+                                   f'stopping the crossing here')
+            self.finish('success')
+            return
 
         # Finished?
         dist = self.walked_enough_for

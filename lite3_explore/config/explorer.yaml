@@ -14,6 +14,7 @@ frontier_explorer:
     # Terrain gaits are switched by special_obstacles when an obstacle is detected.
     # Must match normal_gait_code in special.yaml (crossings switch back to it).
     gait_code: 553714432            # 0x21010300 Flat Slow
+    gait_via_manual: false          # same as special.yaml (false = direct, as on 17/11)
 
     # Opening 360 deg scan (skipped in dry run)
     initial_spin: true       # look-around for the CAMERA; done by Nav2 spin (stops before hitting walls)

@@ -5,7 +5,11 @@ Each item from /perception/found becomes ONE task report (competition brief, sec
   POST <report_server>  JSON {group_id, task_id, task_type, scene_type, label, pos, message}
   pos = centre of the arena cell where the item is (arena coordinates, see mission.yaml)
 
-Duplicates: same task_type + label in the same cell (or same QR text) is reported once.
+Duplicates: same task_type + label in the same cell (or same QR text) is reported once;
+survivors in a room type already reported count as the same survivor.
+task_id comes from task_ids in mission.yaml (M01..M05). Each task_id is sent only ONCE.
+Items with no matching task_id, or that cannot score (room unknown, label not allowed),
+are logged but not sent.
 send_reports: false in mission.yaml -> only logs what would be sent (safe for testing).
 Every report (sent or not) is appended to ~/challenge_ws/reports/run_<time>.jsonl.
 
@@ -28,7 +32,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from lite3_explore.mission_config import Arena, load_mission
+from lite3_explore.mission_config import Arena, load_mission, make_report, pick_task_id
 
 PREFIX = {'survivor': 'S', 'hazard': 'H', 'object': 'O', 'qr': 'Q'}
 COLOURS = {'survivor': (1.0, 0.2, 0.2), 'hazard': (1.0, 0.8, 0.0),
@@ -54,6 +58,7 @@ class Reporter(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/mission/found_markers', 10)
 
         self.reported = {}      # key -> report
+        self.used_ids = set()   # task_ids already sent (each one only once)
         self.counts = {k: 0 for k in PREFIX}
         self.markers = MarkerArray()
         self.lock = threading.Lock()
@@ -69,30 +74,36 @@ class Reporter(Node):
         if t not in PREFIX or not item.get('map_xy'):
             return
         pos = list(self.arena.map_to_cell_centre(*item['map_xy']))
-        key = ('qr', item['message']) if t == 'qr' else (t, item.get('label', ''), tuple(pos))
+        report, problem = make_report(self.cfg, item, pos)
+        if t == 'qr':
+            key = ('qr', report['message'])
+        elif t == 'survivor' and report['scene_type']:
+            key = ('survivor', report['scene_type'])     # one survivor per room type
+        else:
+            key = (t, report['label'], tuple(pos))
 
         with self.lock:
             if key in self.reported:
                 return
-            self.counts[t] += 1
-            report = {
-                'group_id': self.cfg['group_id'],
-                'task_id': self.task_id(t, item.get('label', '')),
-                'task_type': t,
-                'scene_type': item.get('scene_type') or '',
-                'label': item.get('label') or '',
-                'pos': pos,
-                'message': item.get('message') or '',
-            }
+            if problem:
+                self.get_logger().info(f'not reported ({problem}): {item}',
+                                       throttle_duration_sec=5.0)
+                return
+            tid = pick_task_id(self.cfg.get('task_ids'), report, self.used_ids)
             self.reported[key] = report
-        self.add_marker(t, item['map_xy'], report['label'] or report['message'][:20])
+            if tid is None:
+                self.get_logger().warn(f'NO task_id for {json.dumps(report)} (logged only)')
+                self.log(report, 'no_task_id')
+                return
+            self.used_ids.add(tid)
+            self.counts[t] += 1
+            report = {'group_id': report['group_id'], 'task_id': tid,
+                      **{k: v for k, v in report.items() if k != 'group_id'}}
+            self.reported[key] = report
+        self.add_marker(t, item['map_xy'], report['label'] or report['scene_type']
+                        or report['message'][:20])
         threading.Thread(target=self.submit, args=(report,), daemon=True).start()
         self.check_done()
-
-    def task_id(self, task_type, label):
-        ids = self.cfg.get('task_ids') or {}
-        return (ids.get(f'{task_type}:{label}') or ids.get(task_type)
-                or f'{PREFIX[task_type]}{self.counts[task_type]:02d}')
 
     def submit(self, report):
         status = 'dry_run'
@@ -113,6 +124,9 @@ class Reporter(Node):
                 status = 'unreachable'
                 self.get_logger().error(f'Scoring server unreachable: {e}')
         self.get_logger().warn(f'REPORT [{status}] {json.dumps(report)}')
+        self.log(report, status)
+
+    def log(self, report, status):
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps({'time': time.time(), 'status': status, 'report': report}) + '\n')
 

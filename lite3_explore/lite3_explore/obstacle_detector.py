@@ -40,11 +40,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
 from tf2_ros import Buffer, TransformListener
 
 from lite3_explore.locator import Locator
-from lite3_explore.terrain import classify, estimate_floor
+from lite3_explore.terrain import (classify, estimate_floor, shadow_check, surface_wrinkle_mm,
+                                   update_floor, wall_ahead_m)
 from sensor_msgs_py import point_cloud2
 from tf2_ros import TransformException
 
@@ -90,6 +91,13 @@ class ObstacleDetector(Node):
         p('white_frac', 0.70)            # share of low-saturation pixels in the image centre
         p('white_block_dist_m', 0.8)     # something blocking within this distance
         p('white_block_points', 2000)
+        # Wall vs curtain (live 18/11: pale wood walls triggered 'curtain' 3x and the robot
+        # walked into them). A curtain is fabric with folds; a wall is flat. Every curtain
+        # trigger needs the surface ahead to be at least this wrinkled (mm). Flat or no
+        # depth -> NOT a curtain. Tune: face a wall and the curtain at ~0.4 m and read
+        # 'wrinkle_mm' in the log / on /perception/obstacles.
+        p('curtain_flat_check', True)
+        p('curtain_min_wrinkle_mm', 2.5)
         p('rate_hz', 2.0)
         p('trigger_distance_m', 1.2)     # obstacle closer than this ...
         p('path_half_width_m', 0.5)      # ... and within this of the robot's centre line
@@ -103,6 +111,16 @@ class ObstacleDetector(Node):
         p('floor_half_width_m', 0.25)    # robot is 0.37 m wide
         p('wall_min_m', 0.20)            # anything taller than this is a wall, not rubble
         p('floor_z_start', -0.356)       # floor height in base_link, measured live 17/11 (standing)
+        p('floor_tolerance_m', 0.05)     # floor recalibration only within this of floor_z_start
+        # Shadow fallback for potholes: when the depth check finds no potholes (or there is
+        # no depth), look for shadow patches in the bottom third of the image (uneven ground
+        # casts shadows). Skipped when depth sees rubble (slats cast shadows too) or a wall.
+        # Tune: read 'shadow: dark ..' in the log on flat floor and in front of the potholes.
+        p('use_shadow_check', True)
+        p('shadow_dark_ratio', 0.6)      # cell darker than this x median floor brightness = shadow
+        p('shadow_dark_frac', 0.15)      # share of shadow cells for 'potholes'
+        p('shadow_min_brightness', 40.0) # floor darker than this: lighting check not trusted
+        p('shadow_distance_m', 0.8)      # rough distance reported (bottom third = right ahead)
         self.P = {n: self.get_parameter(n).value for n in names}
 
         self.tf_buffer = Buffer()
@@ -116,6 +134,9 @@ class ObstacleDetector(Node):
         self.create_subscription(String, '/mission/state', self.on_state, 10)
         self.event_pub = self.create_publisher(String, '/perception/event', 10)
         self.dets_pub = self.create_publisher(String, '/perception/obstacles', 10)
+        # Nearest wall (>= 20 cm tall) in the robot's path from depth, every frame, also while
+        # crossing: special_obstacles stops rubble / pothole crossings before a wall. -1 = none.
+        self.wall_pub = self.create_publisher(Float32, '/perception/wall_ahead', 10)
         self.img_pub = self.create_publisher(CompressedImage,
                                              '/perception/obstacle_image/compressed', 2)
 
@@ -228,6 +249,18 @@ class ObstacleDetector(Node):
                 seen.add(kind)
             self.draw(img, d)
 
+        # Lighting check (venue light differs from the lab): brightness and how "white"
+        # the centre of the view looks, against the curtain colour rule's limits.
+        centre = cv2.cvtColor(img[int(.2 * h):int(.7 * h), int(.25 * w):int(.75 * w)],
+                              cv2.COLOR_BGR2HSV)
+        self.get_logger().info(
+            f'lighting: brightness {float(centre[..., 2].mean()):.0f}/255 '
+            f'(dark < 60)  saturation {float(centre[..., 1].mean()):.0f}/255  '
+            f'white share {float(((centre[..., 1] < 35) & (centre[..., 2] > 60)).mean()):.2f} '
+            f'(curtain rule > {self.P["white_frac"]})  best YOLO: '
+            + (', '.join(f'{d["kind"]} {d["conf"]:.2f}' for d in dets if 'box' in d) or 'none'),
+            throttle_duration_sec=3.0)
+
         if self.P['white_curtain_check'] and snap is not None and 'curtain' not in seen:
             dist, frac = self.white_curtain(img, snap)
             if dist is not None:
@@ -237,8 +270,17 @@ class ObstacleDetector(Node):
                 cv2.putText(img, f'curtain {dist:.1f}m (white+depth)', (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOURS['curtain'], 2)
 
+        depth_kind, depth_stats = None, {}
         if self.P['use_floor_check'] and snap is not None:
             kind, dist, stats = self.floor_check(snap)
+            depth_kind, depth_stats = kind, stats
+            if 'bump' in stats:
+                self.get_logger().info(
+                    f'floor ahead: bump {stats["bump"]:.2f} (rubble > 0.25)  hole '
+                    f'{stats["hole"]:.2f} (potholes > 0.08)  wall {stats["wall"]:.2f} '
+                    f'wall_at {stats.get("wall_at", "-")}  floor_z '
+                    f'{self.floor_z if self.floor_z is None else round(self.floor_z, 3)}  '
+                    f'-> {kind or "flat"}', throttle_duration_sec=3.0)
             if kind and dist <= self.P['trigger_distance_m']:
                 seen.add(kind)
                 d = {'kind': kind, 'conf': 1.0, 'forward_m': round(dist, 2),
@@ -246,6 +288,52 @@ class ObstacleDetector(Node):
                 dets.append(d)
                 cv2.putText(img, f'{kind} {dist:.1f}m (depth)', (10, h - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOURS[kind], 2)
+
+        # Depth found no potholes -> try the lighting in the bottom third of the frame.
+        wall_ahead = depth_stats.get('wall', 0.0) >= 0.10
+        if (self.P['use_shadow_check'] and 'potholes' not in seen
+                and depth_kind is None and not wall_ahead):
+            v = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 2]
+            found, st = shadow_check(v, dark_ratio=self.P['shadow_dark_ratio'],
+                                     dark_cells_frac=self.P['shadow_dark_frac'],
+                                     min_median=self.P['shadow_min_brightness'])
+            if st:
+                self.get_logger().info(
+                    f'shadow: dark {st["dark"]:.2f} (potholes > {self.P["shadow_dark_frac"]})  '
+                    f'floor brightness {st["median"]:.0f}  darkest '
+                    f'{st.get("darkest", "-")} -> {"potholes" if found else "none"}',
+                    throttle_duration_sec=3.0)
+            cv2.rectangle(img, (w // 4, 2 * h // 3), (3 * w // 4, h - 1),
+                          COLOURS['potholes'], 2 if found else 1)
+            if found:
+                seen.add('potholes')
+                dets.append({'kind': 'potholes', 'conf': st['dark'],
+                             'forward_m': self.P['shadow_distance_m'],
+                             'located_by': 'shadow', 'trigger': True, **st})
+                cv2.putText(img, f'potholes (shadow {st["dark"]:.2f})', (10, h - 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOURS['potholes'], 2)
+
+        if 'curtain' in seen and self.P['curtain_flat_check']:
+            wr = None
+            pts = self.base_points(snap) if snap is not None else None
+            if pts is not None:
+                wr = surface_wrinkle_mm(pts, self.floor_z)
+            fabric = wr is not None and wr >= self.P['curtain_min_wrinkle_mm']
+            for d in dets:
+                if d['kind'] == 'curtain':
+                    d['wrinkle_mm'] = None if wr is None else round(wr, 1)
+                    if not fabric:
+                        d['trigger'] = False
+            if not fabric:
+                seen.discard('curtain')
+                self.get_logger().info(
+                    f'curtain candidate REJECTED: surface ahead is flat '
+                    f'(wrinkle {"no depth" if wr is None else f"{wr:.1f} mm"} < '
+                    f'{self.P["curtain_min_wrinkle_mm"]} mm) -> wall, not curtain',
+                    throttle_duration_sec=2.0)
+            else:
+                self.get_logger().info(f'curtain candidate: wrinkle {wr:.1f} mm (fabric)',
+                                       throttle_duration_sec=2.0)
 
         for kind in self.streak:
             self.streak[kind] = self.streak[kind] + 1 if kind in seen else 0
@@ -300,8 +388,16 @@ class ObstacleDetector(Node):
             pts = pts[::len(pts) // 30000 + 1]
         pts = pts @ R.T + t
         est = estimate_floor(pts)
-        if est is not None:            # flat ahead: (re)calibrate floor height
-            self.floor_z = est if self.floor_z is None else 0.8 * self.floor_z + 0.2 * est
+        # Flat ahead: (re)calibrate floor height, but only near the robot's standing height
+        # (live 18/11 a raised flat board became 'the floor' -> real floor = false potholes).
+        if est is not None and abs(est - self.P['floor_z_start']) > self.P['floor_tolerance_m']:
+            self.get_logger().info(f'floor estimate {est:.3f} ignored (standing floor '
+                                   f'{self.P["floor_z_start"]}): raised surface ahead',
+                                   throttle_duration_sec=3.0)
+        self.floor_z = update_floor(self.floor_z, est, self.P['floor_z_start'],
+                                    self.P['floor_tolerance_m'])
+        wall = wall_ahead_m(pts, self.floor_z, wall_min=self.P['wall_min_m'])
+        self.wall_pub.publish(Float32(data=-1.0 if wall is None else wall))
         return classify(pts, self.floor_z, half_width=self.P['floor_half_width_m'],
                         wall_min=self.P['wall_min_m'])
 
@@ -309,10 +405,13 @@ class ObstacleDetector(Node):
         now = time.monotonic()
         if now - self.last_event.get(kind, -1e9) < self.P['cooldown_s']:
             return
-        self.last_event[kind] = now
         best = max((d for d in dets if d['kind'] == kind), key=lambda d: d['conf'])
         active = self.mission_state in (None, 'EXPLORE', 'GO_TO_EXIT')
         will = self.P['publish_events'] and active
+        if will:
+            # Start the cooldown only when the event is really sent: an event dropped while
+            # the robot is busy (crossing / looking) must not hide the next real obstacle.
+            self.last_event[kind] = now
         self.get_logger().warn(f'{"EVENT" if will else "would send"}: {EVENTS[kind]} {best}')
         if will:
             self.event_pub.publish(String(data=EVENTS[kind]))
