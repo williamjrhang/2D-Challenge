@@ -85,9 +85,9 @@ class MissionController(Node):
         p('approach_timeout_s', 40.0)
         p('approach_wait_s', 6.0)          # wait this long at the spot for the close-range trigger
         # Position-jump guard (live 20/11: Fast-LIO jumped tens of metres, goals 32 m away,
-        # messy map). The robot walks <= 0.5 m/s, so > pose_jump_m between two ticks (0.2 s)
+        # messy map). SLAM corrections of ~1 m are normal; real breakage jumped 20+ m. More than pose_jump_m between two ticks (0.2 s)
         # = broken tracking -> stop everything. Restart the robot launch. 0 = off.
-        p('pose_jump_m', 1.0)
+        p('pose_jump_m', 3.0)                # 1.0 fired on a normal 1.0 m SLAM correction (20/11)
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'global_frame', 'tick_hz', 'investigate_timeout_s',
