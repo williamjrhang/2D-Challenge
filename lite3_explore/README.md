@@ -1,6 +1,7 @@
 # lite3_explore — Group 5 ground robot (Lite3)
 
-The robot explores the arena on its own (frontier exploration + Nav2), crosses stairs /
+The robot explores the arena on its own (frontier exploration + Nav2, then it drives to
+whatever the camera has not looked at yet), crosses stairs /
 uneven terrain / curtains with a special walking routine, finds survivors, hazard signs,
 rooms and QR codes, reports them to the scoring server, and heads to the final cell.
 
@@ -21,7 +22,8 @@ camera ──► vlm_watcher (course scene server, while moving) ─► room / h
 | File | What it does |
 | --- | --- |
 | `lite3_explore/frontiers.py` | Finds and scores frontiers on the map. Pure numpy, no ROS. |
-| `lite3_explore/explorer_node.py` | Frontier exploration with Nav2. At start: sets the walking gait, then a Nav2 look-around spin (stops before walls). Timeouts, blacklist. |
+| `lite3_explore/coverage.py` | Camera coverage: pose history, what the forward camera has seen (raycast on the map), goals where it has not looked, save / load. Pure numpy, no ROS. |
+| `lite3_explore/explorer_node.py` | Frontier exploration with Nav2. At start: sets the walking gait, then a Nav2 look-around spin (stops before walls). Timeouts, blacklist. No frontiers left → COVER (camera coverage). HOLD = stand still so the obstacle detector can confirm. |
 | `lite3_explore/special_obstacles.py` | Crosses stairs / rubble / curtain: stop → switch gait → walk straight → switch back. |
 | `lite3_explore/mission_controller.py` | The "boss": explore / look / cross / go to final cell, overall time limit. |
 | `lite3_explore/obstacle_detector.py` | YOLO-World (no training) + depth: sends `stairs_ahead`, `curtain_ahead`, `rubble_ahead`. |
@@ -88,10 +90,48 @@ Options: `use_vlm:=false`, `use_qr:=false`, `use_yolo:=false` switch single part
 Terminal 3 — `lite3_auto` before a live run, `lite3_manual` after.
 **Stop:** Ctrl+C in Terminal 2, then `lite3_manual`. The joystick always overrides (twist_mux).
 
+### Make sure the camera has seen everything (COVER)
+
+SLAM maps a room from its doorway, so frontiers run out before the forward camera (which
+reads the QR codes on the side walls) has looked inside. With `coverage_enabled: true` the
+explorer remembers every robot pose, raycasts the camera's view (`camera_fov_deg` 70°,
+`camera_range_m` 2.5 m, stopped by walls) on the current map, and when no frontiers are left
+switches to **COVER**: it drives to free cells the camera has not seen yet, checking for new
+frontiers first. `/exploration/done` is only sent when `coverage_target` (95 %) of the free
+cells has been seen, or when no coverage goal is reachable for `done_after_empty_checks` ticks.
+The pose history is saved to `~/challenge_ws/coverage/coverage_<time>.npz` every 10 s and on
+shutdown; `resume_coverage: true` reloads it (only valid if SLAM keeps the same map frame).
+
+`bounds` limits which cells count. With bounds off (`[0.0]`) every mapped free cell counts,
+including the lab beyond the course openings, so the robot may keep going: stop it by hand.
+
+Open `config/maze.rviz` and start the mission in dry run. *Camera coverage* shows free cells
+the camera has not seen in purple (seen cells are transparent), the walked trail is cyan,
+frontiers are orange / blue and coverage goals green. `/exploration/coverage_pct` gives the
+percentage. Drive past a side room without looking in: it stays purple although it is mapped.
+Turn the robot to face into it and the purple clears.
+
+### Stand still so the gait change can fire (HOLD)
+
+`obstacle_detector` only sends `stairs_ahead` / `rubble_ahead` / `curtain_ahead` /
+`potholes_ahead` after `confirm_frames` frames in a row (3 at 2 Hz = 1.5 s), so a robot that
+turns away straight after a goal never changes gait. The explorer therefore stands still
+(state HOLD, `/mission/state` stays EXPLORE):
+
+* `goal_dwell_s` (2.5 s) after reaching a frontier or coverage goal, facing the travel direction.
+  Keep it above `confirm_frames / rate_hz` + ~1 s.
+* `obstacle_hold_s` (4 s) when Nav2 fails, times out or makes no progress while a stairs / rubble /
+  curtain / potholes detection is ahead (`/perception/obstacles`, within `obstacle_hold_m`, in the
+  last `obstacle_recent_s`). The goal is not blacklisted; if no crossing starts, the normal
+  blacklist + recovery follows. Once per goal.
+
+Both are 0 (off) in the code defaults and never run in dry run. The crossing itself still needs
+`publish_obstacles:=true`.
+
 ### Safety switches (all OFF by default)
 | Switch | Where | Off means |
 | --- | --- | --- |
-| `live:=true` | launch | explorer only shows frontiers, never drives |
+| `live:=true` | launch | explorer only shows frontiers and coverage, never drives |
 | `publish_obstacles:=true` | launch | detector only LOGS "would send: stairs_ahead" |
 | `send_reports: true` | `config/mission.yaml` | reporter only logs to `~/challenge_ws/reports/` |
 
@@ -237,8 +277,10 @@ Finish with `gait_rough`. Take the drone off for these tests.
   on the real terrain (YOLO-World missed the wooden slats). Thresholds in `terrain.py`.
 * **Curtain**: the lidar sees it as a wall, so the explorer will not plan through it and may never
   drive up to it. Detection only fires when the robot is within 1.2 m and facing it.
-* **QR codes are on side walls**; the camera looks forward. Planned: turn ±60° when looking in a room.
-* **Arena boundary**: the explorer may try to leave through the final-cell opening.
+* **QR codes are on side walls**; the camera looks forward. COVER drives to what the camera has
+  not seen and the 360° goal spin turns the camera, but the camera is never aimed at a wall on purpose.
+* **Arena boundary**: the explorer may try to leave through the final-cell opening (bounds off:
+  frontiers and camera coverage include the lab).
 * **Curtain / stairs alignment**: the crossing walks straight from the current heading —
   the robot must already face the doorway / stairs.
 * **Stairs**: AI mode wired in (simulation-tested only); pitch thresholds 8° / 3° are defaults —
