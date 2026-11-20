@@ -178,7 +178,6 @@ class SpecialObstacles(Node):
         self.platform_logged = False
         self.window_start = 0.0
         self.window_xy = None
-        self.abort_reason = ''
         self.in_ai = False
         self.pending_result = None
         self.odom_src = None
@@ -319,7 +318,6 @@ class SpecialObstacles(Node):
         return math.hypot(self.xy[0] - self.start_xy[0], self.xy[1] - self.start_xy[1])
 
     def abort(self, reason):
-        self.abort_reason = reason
         self.get_logger().warn(f'{self.kind}: ABORT ({reason})')
         self.set_phase('ABORT')
 

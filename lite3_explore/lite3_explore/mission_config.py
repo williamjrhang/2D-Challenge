@@ -42,11 +42,15 @@ class Arena:
         c, s = math.cos(self.yaw), math.sin(self.yaw)
         return c * dx + s * dy, -s * dx + c * dy
 
+    def cell_index(self, ax, ay):
+        return (round((ax - self.start[0]) / self.cell),
+                round((ay - self.start[1]) / self.cell))
+
     def cell_centre(self, ax, ay):
         """Snap an arena point to the centre of its grid cell. Cell centres sit at
         start_cell_centre + k * cell_size (booklet: start = (0, 0), spacing 1.02 m)."""
-        return (self.start[0] + round((ax - self.start[0]) / self.cell) * self.cell,
-                self.start[1] + round((ay - self.start[1]) / self.cell) * self.cell)
+        i, j = self.cell_index(ax, ay)
+        return self.start[0] + i * self.cell, self.start[1] + j * self.cell
 
     def map_to_cell_centre(self, x, y):
         cx, cy = self.cell_centre(*self.map_to_arena(x, y))

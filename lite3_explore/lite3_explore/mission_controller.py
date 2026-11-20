@@ -77,7 +77,7 @@ class MissionController(Node):
         p('exit_timeout_s', 120.0)
         p('look_cooldown_s', 5.0)           # ignore new look events right after a look
         # APPROACH: drive on purpose to obstacles the camera saw (the lidar sees the curtain /
-        # rubble as a wall, so there is no frontier behind them).
+        # rubble as a wall, so the explorer never plans a path through them).
         p('approach_kinds', ['stairs', 'curtain', 'rubble'])  # remove 'stairs' to never go to stairs
         p('approach_min_sightings', 3)     # seen this many times before we drive there
         p('approach_merge_m', 0.8)         # sightings closer than this = same obstacle
@@ -310,6 +310,7 @@ class MissionController(Node):
             # Stop now and then so the scene VLM can name the room / spot hazards.
             if (self.P['look_every_s'] > 0
                     and self.now_s() - self.last_look_end > self.P['look_every_s']):
+                self.get_logger().info('Scheduled look-around is due; pausing exploration.')
                 self.enter('INVESTIGATE')
             return
         if self.exit_xy is not None or self.explore_done:
@@ -342,6 +343,9 @@ class MissionController(Node):
             if self.nav.goToPose(goal) is False:
                 return self.approach_failed('Nav2 rejected the goal')
             self.approach_sent = True
+            self.get_logger().info(
+                f'Nav2 accepted approach to {o["kind"]} at '
+                f'({goal.pose.position.x:.2f}, {goal.pose.position.y:.2f})')
             return
         if self.arrived_at is None:
             if self.nav.isTaskComplete():

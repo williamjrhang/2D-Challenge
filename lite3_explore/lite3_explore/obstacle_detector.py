@@ -48,7 +48,6 @@ from tf2_ros import Buffer, TransformListener
 from lite3_explore.locator import Locator
 from lite3_explore.terrain import (classify, estimate_floor, shadow_check, surface_wrinkle_mm,
                                    update_floor, wall_ahead_m)
-from sensor_msgs_py import point_cloud2
 from tf2_ros import TransformException
 
 EVENTS = {'stairs': 'stairs_ahead', 'curtain': 'curtain_ahead',
@@ -384,28 +383,24 @@ class ObstacleDetector(Node):
         return float(np.percentile(block[:, 0], 5)), frac
 
     def base_points(self, snap):
-        cloud = snap['cloud']
-        try:
-            R, t = self.locator.transform(self.locator.robot_frame, cloud.header.frame_id)
-        except TransformException:
-            return None
-        pts = point_cloud2.read_points_numpy(cloud, field_names=('x', 'y', 'z'),
-                                             skip_nans=True).astype(float)
-        if len(pts) > 30000:
-            pts = pts[::len(pts) // 30000 + 1]
-        return pts @ R.T + t
+        """Depth points in base_link, thinned to ~30k. Computed once per frame and shared
+        by the floor check, the white-curtain check and the curtain wrinkle check."""
+        if 'base_pts' not in snap:
+            try:
+                R, t = self.locator.transform(self.locator.robot_frame,
+                                              snap['cloud'].header.frame_id)
+            except TransformException:
+                return None
+            pts = self.locator.cloud_xyz(snap)
+            if len(pts) > 30000:
+                pts = pts[::len(pts) // 30000 + 1]
+            snap['base_pts'] = pts @ R.T + t
+        return snap['base_pts']
 
     def floor_check(self, snap):
-        cloud = snap['cloud']
-        try:
-            R, t = self.locator.transform(self.locator.robot_frame, cloud.header.frame_id)
-        except TransformException:
+        pts = self.base_points(snap)
+        if pts is None:
             return None, None, {}
-        pts = point_cloud2.read_points_numpy(cloud, field_names=('x', 'y', 'z'),
-                                             skip_nans=True).astype(float)
-        if len(pts) > 30000:
-            pts = pts[::len(pts) // 30000 + 1]
-        pts = pts @ R.T + t
         est = estimate_floor(pts)
         # Flat ahead: (re)calibrate floor height, but only near the robot's standing height
         # (live 18/11 a raised flat board became 'the floor' -> real floor = false potholes).

@@ -30,7 +30,6 @@ class Locator:
 
     def __init__(self, node, tf_buffer, global_frame='map', robot_frame='base_link',
                  info_topic='/camera/color/camera_info', cloud_topic='/camera/depth/points'):
-        self.node = node
         self.tf = tf_buffer
         self.global_frame = global_frame
         self.robot_frame = robot_frame
@@ -75,6 +74,15 @@ class Locator:
         return {'cloud': self.cloud, 'R_cd': R_cd, 't_cd': t_cd, 'R_mc': R_mc, 't_mc': t_mc,
                 'pose': self.robot_pose()}
 
+    @staticmethod
+    def cloud_xyz(snap):
+        """x, y, z of the snapshot's cloud (NaNs dropped). Parsed once per snapshot and
+        reused by every caller (parsing a full depth cloud is the expensive part)."""
+        if 'xyz' not in snap:
+            snap['xyz'] = point_cloud2.read_points_numpy(
+                snap['cloud'], field_names=('x', 'y', 'z'), skip_nans=True).astype(float)
+        return snap['xyz']
+
     def locate_box(self, box, image_w, image_h, snap=None):
         """box = (x1, y1, x2, y2) in pixels of an image of size image_w x image_h.
         Returns map (x, y) or None if there is no usable depth inside the box."""
@@ -83,8 +91,7 @@ class Locator:
             return None
         R_cd, t_cd, R_mc, t_mc = snap['R_cd'], snap['t_cd'], snap['R_mc'], snap['t_mc']
 
-        pts = point_cloud2.read_points_numpy(snap['cloud'], field_names=('x', 'y', 'z'),
-                                             skip_nans=True).astype(float)
+        pts = self.cloud_xyz(snap)
         if len(pts) > 60000:                      # thin out for speed
             pts = pts[::len(pts) // 60000 + 1]
         pts = pts @ R_cd.T + t_cd                 # into colour camera frame

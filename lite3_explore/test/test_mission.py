@@ -1,9 +1,7 @@
 """Run with:  python3 -m pytest test/   (no ROS needed)"""
-import json
 import math
 
 import cv2
-import numpy as np
 import pytest
 
 from lite3_explore.mission_config import Arena
