@@ -42,8 +42,31 @@ Visualization Manager:
       Size (m): 0.04
       Color Transformer: FlatColor
       Color: 255; 0; 0
+    - Class: rviz_default_plugins/Map
+      Name: Camera coverage (purple = not seen yet)
+      Enabled: true
+      Topic:
+        Value: /exploration/coverage
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Alpha: 0.5
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/Path
+      Name: Walked trail (coverage poses)
+      Enabled: true
+      Topic:
+        Value: /exploration/trail
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color: 25; 220; 255
+      Line Style: Lines
+      Line Width: 0.03
     - Class: rviz_default_plugins/MarkerArray
-      Name: Exploration frontiers
+      Name: Frontiers (orange/blue) + coverage goals (green)
       Enabled: true
       Topic:
         Value: /exploration/frontiers
