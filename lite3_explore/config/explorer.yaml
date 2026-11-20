@@ -53,3 +53,33 @@ frontier_explorer:
     # camera sees side walls (QR codes). 360 deg at 0.5 rad/s ~ 13 s; 180 if time is tight.
     goal_spin_deg: 360.0
     goal_spin_min_gap_m: 2.0
+
+    # ---- Camera coverage (COVER state, coverage.py) ----
+    # "Mapped" is not "explored": SLAM maps a room from the doorway, but QR codes are on the
+    # side walls and only the forward camera reads them. When no frontiers are left, the
+    # explorer drives to free cells the camera has not looked at yet. DONE (and
+    # /exploration/done) only when coverage_target is reached or no coverage goal is
+    # reachable for done_after_empty_checks ticks. false = old behaviour (DONE on no frontiers).
+    # Coverage only counts cells inside `bounds` above. bounds off ([0.0]) = every mapped free
+    # cell counts (also the lab outside the arena), so it may keep going: stop it by hand.
+    coverage_enabled: true
+    coverage_target: 0.95            # share of free cells (inside bounds) the camera must see
+    camera_fov_deg: 70.0             # forward camera horizontal field of view
+    camera_range_m: 2.5              # distance at which a QR code is still readable
+    robot_radius_m: 0.35             # cells the robot stood on also count as seen
+    coverage_min_cluster_cells: 10   # ignore unseen patches smaller than this (10 x 5 cm cells)
+    coverage_save_period_s: 10.0     # pose history saved this often (and on shutdown)
+    coverage_file: ""                # "" = ~/challenge_ws/coverage/coverage_<YYYYmmdd_HHMMSS>.npz
+    resume_coverage: false           # true = load coverage_file (or the newest file) at start.
+                                     # ONLY if SLAM keeps the same map frame (same saved map /
+                                     # same start pose), otherwise the old poses are in the wrong place.
+
+    # ---- HOLD: stand still so obstacle_detector can confirm (gait change) ----
+    # The detector needs confirm_frames frames in a row (obstacle.yaml: 3 at rate_hz 2 =
+    # 1.5 s, more if YOLO runs slower) before it sends stairs/rubble/curtain/potholes_ahead.
+    # goal_dwell_s must be > confirm_frames / rate_hz + ~1 s. 0 = off.
+    goal_dwell_s: 2.5                # after reaching a frontier / coverage goal, facing travel direction
+    obstacle_hold_s: 4.0             # Nav2 failed / timed out / no progress AND an obstacle is ahead:
+                                     # hold instead of blacklisting + recovery (once per goal)
+    obstacle_hold_m: 1.5             # detection with 0 < forward_m <= this and |left_m| <= 0.5 (or trigger)
+    obstacle_recent_s: 2.0           # ... that arrived within this many seconds
