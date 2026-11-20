@@ -90,6 +90,21 @@ Options: `use_vlm:=false`, `use_qr:=false`, `use_yolo:=false` switch single part
 Terminal 3 — `lite3_auto` before a live run, `lite3_manual` after.
 **Stop:** Ctrl+C in Terminal 2, then `lite3_manual`. The joystick always overrides (twist_mux).
 
+### Follow exploration decisions live
+
+With the mission launch running, open another terminal on the computer that ran the launch:
+
+```bash
+cd ~/challenge_ws
+tail -F log/lite3_explore_decisions.log
+```
+
+The launch prints the full path and appends a header for each run. The log includes
+the frontier ranking and selected goals, COVER coverage goals and %, HOLDs, Nav2 progress
+and cancellation reasons, mission mode changes, and obstacle crossing status. It also works in dry run. Start the launch
+with `decision_log:=/path/to/run.log` to keep a separate file for a run. Relative paths
+are resolved from the directory where you launch the mission.
+
 ### Make sure the camera has seen everything (COVER)
 
 SLAM maps a room from its doorway, so frontiers run out before the forward camera (which
