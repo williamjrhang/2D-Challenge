@@ -31,7 +31,7 @@ obstacle_detector:
     cooldown_s: 15.0              # then wait this long before sending that kind again
 
     # Curtain by colour + depth, and the wall veto (fabric folds vs flat wall)
-    white_curtain_check: true
+    white_curtain_check: false     # 20 Nov: fired on a wall (76% pale, wrinkle 12.7 mm = like the real curtain). Curtain from YOLO only
     white_frac: 0.7               # share of pale pixels in the image centre
     white_block_dist_m: 0.7       # something blocking within this distance
     white_block_points: 2000

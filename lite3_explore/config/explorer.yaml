@@ -48,6 +48,11 @@ frontier_explorer:
     # are ignored. Map origin = start pose, +x = start forward, +y = left. [0.0] = off.
     # MEASURE on the day (layout changes on 27 Nov). Write decimals: [-0.6, -3.4, 5.5, 0.6]
     bounds: [0.0]
+    # Large-map guard (used only while bounds is off): frontiers AND camera coverage limited to
+    # +/- guard_radius_m around the start pose, so COVER doesn't chase the lab outside the
+    # arena or ghost walls after a SLAM jump. 6 m covers a ~5 x 5-cell maze from any corner.
+    # Set it to the maze size + ~1 m. 0 = off (unbounded, old behaviour).
+    guard_radius_m: 6.0
 
     # Look-around after reaching a goal >= goal_spin_min_gap_m from the last one, so the
     # camera sees side walls (QR codes). 360 deg at 0.5 rad/s ~ 13 s; 180 if time is tight.

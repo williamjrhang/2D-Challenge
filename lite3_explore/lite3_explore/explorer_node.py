@@ -111,6 +111,10 @@ class FrontierExplorer(Node):
         # Arena box in the map frame [xmin, ymin, xmax, ymax]; frontiers outside are ignored
         # (open walls / the final cell's missing wall let the lidar map the lab). [] = off.
         p('bounds', [0.0])
+        # Large-map guard: when bounds is off, frontiers AND camera coverage are limited to a
+        # box +/- guard_radius_m around the start pose (map origin), so the lab outside the
+        # arena and ghost walls after a SLAM jump don't keep COVER going forever. 0 = off.
+        p('guard_radius_m', 6.0)
         # Look-around after reaching a goal, so the camera sees side walls (QR codes are on
         # the left/right walls of rooms). 0 = off. Only if this far from the last one.
         p('goal_spin_deg', 0.0)
@@ -141,7 +145,7 @@ class FrontierExplorer(Node):
             'min_progress_m', 'recheck_period_s', 'blacklist_radius_m',
             'backup_speed', 'backup_time_s', 'max_consecutive_failures',
             'done_after_empty_checks', 'gait_code', 'gait_via_manual',
-            'bounds', 'goal_spin_deg', 'goal_spin_min_gap_m',
+            'bounds', 'guard_radius_m', 'goal_spin_deg', 'goal_spin_min_gap_m',
         ]}
         # [COVER] [HOLD] new params
         self.P.update({name: g(name) for name in [
@@ -152,6 +156,10 @@ class FrontierExplorer(Node):
         ]})
         b = [float(v) for v in (self.P['bounds'] or [])]
         self.bounds = b if len(b) == 4 else None     # [0.0] / [] in yaml = off
+        guard = float(self.P['guard_radius_m'])
+        if self.bounds is None and guard > 0:
+            self.bounds = [-guard, -guard, guard, guard]  # large-map guard around the start pose
+            self.get_logger().info(f'bounds off: large-map guard +/- {guard:.1f} m around the start')
         self.last_spin_xy = None
 
         # [COVER] pose history (map frame), seen mask, save file

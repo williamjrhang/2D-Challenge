@@ -84,12 +84,16 @@ class MissionController(Node):
         p('approach_standoff_m', 0.6)      # stop this far before it (base_link; nose is ~0.3 m ahead)
         p('approach_timeout_s', 40.0)
         p('approach_wait_s', 6.0)          # wait this long at the spot for the close-range trigger
+        # Position-jump guard (live 20/11: Fast-LIO jumped tens of metres, goals 32 m away,
+        # messy map). The robot walks <= 0.5 m/s, so > pose_jump_m between two ticks (0.2 s)
+        # = broken tracking -> stop everything. Restart the robot launch. 0 = off.
+        p('pose_jump_m', 1.0)
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'global_frame', 'tick_hz', 'investigate_timeout_s',
             'traverse_timeout_s', 'exit_timeout_s', 'look_cooldown_s', 'look_every_s',
             'approach_kinds', 'approach_min_sightings', 'approach_merge_m',
-            'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s']}
+            'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s', 'pose_jump_m']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -147,6 +151,7 @@ class MissionController(Node):
         self.approach_sent = False
         self.arrived_at = None
         self.traverse_xy = None
+        self.last_xy = None
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
         self.enter('EXPLORE')
@@ -272,6 +277,23 @@ class MissionController(Node):
     # ================= main loop =================
 
     def tick(self):
+        # Position jumped (broken SLAM / odometry)? Stop instead of chasing garbage goals.
+        if self.P['pose_jump_m'] > 0 and self.state != 'DONE':
+            here = self.robot_xy()
+            if here is not None and self.last_xy is not None:
+                jump = math.hypot(here[0] - self.last_xy[0], here[1] - self.last_xy[1])
+                if jump > self.P['pose_jump_m']:
+                    self.get_logger().error(
+                        f'Robot position jumped {jump:.1f} m in one tick: tracking (Fast-LIO / '
+                        f'SLAM) is broken. STOPPING. Ctrl+C, lite3_manual, restart the robot launch.')
+                    if self.state == 'TRAVERSE':
+                        self.special_pub.publish(String(data='stop'))
+                    self.cancel_nav()
+                    self.last_xy = None
+                    self.enter('DONE')
+                    return
+            if here is not None:
+                self.last_xy = here
         # Overall time limit: leave enough time to reach the final cell.
         elapsed = self.now_s() - self.start_time
         if (self.time_limit > 0 and not self.out_of_time
