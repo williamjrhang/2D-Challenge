@@ -25,7 +25,7 @@ obstacle_detector:
     trigger_distance_m: 1.2       # stairs / rubble / potholes closer than this ...
     path_half_width_m: 0.5        # ... and within this of the robot's centre line
     curtain_trigger_m: 0.7        # curtain: only this close, and only with depth
-    sighting_range_m: 3.0         # stairs / curtain / rubble seen this far -> APPROACH mode
+    sighting_range_m: 1.5         # was 3.0: saw a "curtain" in the neighbouring maze (22 Nov). Only drive to things this close
     person_distance_m: 3.0
     confirm_frames: 3             # same kind this many frames in a row -> event
     cooldown_s: 15.0              # then wait this long before sending that kind again
