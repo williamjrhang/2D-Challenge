@@ -29,7 +29,7 @@ special_obstacles:
     gait_via_manual: false
     ai_enter_code: 553714984        # 0x21010528 Enter AI
     ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
-    ai_auto_code: 553716739         # 0x21010C03 auto, re-sent 1 s after Enter AI (22 Nov: AI mode ignored code commands). 0 = off
+    ai_auto_code: 0                 # OFF (22 Nov): re-sending auto after Enter AI switched AI OFF -> climbed in the normal gait and tipped 36 deg
     stairs_progress_window_s: 10.0  # stairs only: must move stairs_min_progress_m in this time
     stairs_min_progress_m: 0.05
     stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
