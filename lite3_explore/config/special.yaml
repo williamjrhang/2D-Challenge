@@ -30,7 +30,7 @@ special_obstacles:
     ai_enter_code: 553714984        # 0x21010528 Enter AI
     ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
     stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
-    rubble_gait_code: 553714689     # 0x21010401 RUG General  - uneven terrain  ✅ tested
+    rubble_gait_code: 553714695   # 0x21010407 RUG H-Step (was 0x21010401 RUG General, changed 22 Nov at the team's request)
     potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 
     # ---- Speeds (m/s): start slow, raise only after it works ----
