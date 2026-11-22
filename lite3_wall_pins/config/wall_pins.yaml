@@ -1,0 +1,63 @@
+# lite3_wall_pins - observe-only QR / picture pins. Rebuild after editing (launch reads the
+# installed copy), or pass params_file:=<path> to the launch file.
+wall_pins:
+  ros__parameters:
+    # --- inputs (checked live 18/11: all three at ~10 Hz, RGB/depth stamps within 34 ms)
+    image_topic: /camera/color/image_raw/compressed
+    camera_info_topic: /camera/color/camera_info
+    cloud_topic: /camera/depth/points
+    global_frame: map
+    robot_frame: base_link
+
+    # --- timing / sync
+    rate_hz: 3.0                 # RGB frames per second checked for QR codes
+    max_sync_dt_s: 0.05          # RGB <-> depth stamp difference allowed
+    sync_wait_s: 0.6             # depth arrives ~0.1 s after RGB; wait this long for it
+    cloud_buffer_s: 3.0
+    tf_timeout_s: 0.3            # wait this long for TF at the image stamp, then skip
+    max_image_age_s: 2.0         # images older than this (node clock) are skipped
+    max_future_s: 0.5            # images stamped this far in the future are skipped
+
+    # --- depth inside the detected region
+    min_range_m: 0.2
+    max_range_m: 4.0
+    qr_region_shrink: 0.8        # inner 80% of the QR quad (avoid the wall edge)
+    picture_region_shrink: 0.6
+    min_points: 10
+    min_inlier_frac: 0.6         # share of region points on one surface
+    depth_tol_abs_m: 0.06
+    depth_tol_rel: 0.03
+    min_coverage: 0.10           # depth points per region pixel
+
+    # --- pins
+    map_id: default              # one JSON file per map; use a new id for a new SLAM map
+    pins_file: ""                # "" -> ~/.ros/lite3_wall_pins/<map_id>.json
+    load_saved: true
+    merge_radius_m: 0.6          # same QR payload within this -> same pin
+    picture_merge_radius_m: 0.8  # any picture within this -> same pin
+    save_period_s: 5.0
+    marker_period_s: 1.0
+    show_view_pose: true
+
+    # --- QR (OpenCV)
+    enable_qr: true
+    qr_try_upscale: true         # re-read small found-but-undecoded codes at 2x
+    qr_min_size_px: 12.0
+
+    # --- printed pictures of people: EXPERIMENTAL, off by default (see README)
+    enable_pictures: false
+    picture_rate_hz: 1.0
+    picture_model: yolov8s-worldv2.pt
+    model_dir: ~/challenge_ws/models
+    picture_prompts: ["poster of a person on a wall", "printed photo of a person"]
+    person_prompt: person        # only logged next to a picture, never pinned on its own
+    picture_conf: 0.30
+    picture_imgsz: 480
+    picture_threads: 2           # CPU cap, same reasoning as lite3_explore obstacle_detector
+    picture_nice: 10
+    picture_require_flat: true   # depth must be a plane (sheet on a wall), not a 3D body
+    picture_flat_tol_m: 0.03         # plane tolerance at 0 m ...
+    picture_flat_tol_per_m2: 0.005   # ... + this * range^2 (2 m -> 5 cm)
+    picture_flat_frac: 0.85
+
+    debug_image: true            # /wall_pins/debug_image, only built while someone watches
