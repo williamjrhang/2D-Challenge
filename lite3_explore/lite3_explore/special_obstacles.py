@@ -442,7 +442,7 @@ class SpecialObstacles(Node):
             if self.kind == 'stairs' and self.P['stairs_use_ai_mode']:
                 self.send_gait(self.P['ai_enter_code'])
                 self.in_ai = True
-                self.ai_auto_sent = False
+                self.ai_auto_count = 0
                 self.get_logger().info('stairs: AI mode ON')
                 self.set_phase('GAIT')
                 return
@@ -462,13 +462,17 @@ class SpecialObstacles(Node):
                 and self.in_phase_s() >= 1.0):
             self.send_gait(self.gait_code_for(self.kind))
             self.gait_resent = True
-        # AI mode: re-assert AUTO (ROS commands) 1 s after Enter AI.
-        if (self.in_ai and self.P['ai_auto_code'] and not getattr(self, 'ai_auto_sent', True)
-                and self.in_phase_s() >= 1.0):
-            self.send_gait(self.P['ai_auto_code'])
-            self.ai_auto_sent = True
-            self.get_logger().info('stairs: AUTO re-sent after entering AI mode')
-        if self.in_phase_s() >= 2.0:   # give the robot time to change gait / enter AI
+        # AI mode: re-assert AUTO (ROS commands) at 1 s and 2.5 s after Enter AI. 22/11: one
+        # send at 1 s sometimes landed while AI was still switching on and was ignored.
+        if self.in_ai and self.P['ai_auto_code']:
+            sent = getattr(self, 'ai_auto_count', 2)
+            due = (1.0, 2.5)
+            if sent < len(due) and self.in_phase_s() >= due[sent]:
+                self.send_gait(self.P['ai_auto_code'])
+                self.ai_auto_count = sent + 1
+                self.get_logger().info(f'stairs: AUTO re-sent after entering AI mode ({sent + 1}/2)')
+        wait = 3.0 if self.in_ai else 2.0    # AI mode takes longer to switch on
+        if self.in_phase_s() >= wait:   # give the robot time to change gait / enter AI
             self.begin_cross()
 
     def terrain_ahead(self):
@@ -517,6 +521,9 @@ class SpecialObstacles(Node):
                 self.stairs_boost = min(top, self.stairs_boost + self.P['stairs_boost_step'])
                 self.get_logger().warn(f'stairs: not moving, pushing harder: '
                                        f'{base + self.stairs_boost:.2f} m/s')
+            if self.in_ai and self.P['ai_auto_code']:
+                self.send_gait(self.P['ai_auto_code'])   # maybe AUTO was not taken: again
+                self.get_logger().warn('stairs: not moving, AUTO re-sent')
             self.stall_t = now
         return base + self.stairs_boost
 
