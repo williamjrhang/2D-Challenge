@@ -151,3 +151,21 @@ def test_wall_ahead_ignores_rubble_and_sees_wall():
     pts[wall, 2] = rng.uniform(ref, ref + 0.6, wall.sum())
     d = wall_ahead_m(pts, ref)
     assert d is not None and 1.1 <= d < 1.2
+
+
+def test_roller_across_the_path_is_rubble():
+    # 22/11: a white roller (~15 cm) across the corridor: only ~15% of the region is bumps,
+    # below rubble_frac, but it is a 'bar' -> rubble (high-step crossing).
+    pts = patch()
+    roller = (pts[:, 0] > 0.85) & (pts[:, 0] < 1.0)
+    pts[roller, 2] = FLOOR + 0.12
+    kind, dist, stats = classify(pts, FLOOR)
+    assert kind == 'rubble' and 0.84 < dist < 0.9, stats
+
+
+def test_scattered_small_bumps_are_not_a_bar():
+    pts = patch()
+    spots = rng.random(len(pts)) < 0.05           # 5% random bumps (noise, small stones)
+    pts[spots, 2] = FLOOR + 0.05
+    kind, _, stats = classify(pts, FLOOR)
+    assert kind is None, stats

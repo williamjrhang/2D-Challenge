@@ -44,8 +44,12 @@ def update_floor(current, est, ref, tol=0.05, alpha=0.2):
 
 def classify(pts, floor_z, x_min=0.4, x_max=1.5, half_width=0.25,
              bump_min=0.03, wall_min=0.20, hole_min=0.04,
-             rubble_frac=0.25, hole_frac=0.08, wall_frac=0.10, min_points=200):
-    """Return (kind, nearest_x, stats). kind is 'rubble', 'potholes' or None."""
+             rubble_frac=0.25, hole_frac=0.08, wall_frac=0.10, min_points=200,
+             bar_len=0.20, bar_frac=0.5, bar_min_points=40):
+    """Return (kind, nearest_x, stats). kind is 'rubble', 'potholes' or None.
+    A 'bar' across the path (roller, pipe, beam: any bar_len-long strip ahead with more than
+    bar_frac bump points) is rubble too, although it covers far less than rubble_frac of the
+    region (22/11: white roller in the arena)."""
     r = floor_region(pts, x_min, x_max, half_width)
     stats = {'n': int(len(r))}
     if len(r) < min_points or floor_z is None:
@@ -72,7 +76,24 @@ def classify(pts, floor_z, x_min=0.4, x_max=1.5, half_width=0.25,
         return 'potholes', float(r[hole, 0].min()), stats
     if bump.mean() > rubble_frac and wall.mean() < wall_frac:
         return 'rubble', float(r[bump, 0].min()), stats
+    if wall.mean() < wall_frac:
+        bar = _bar_ahead(r[:, 0], bump, x_min, x_max, bar_len, bar_frac, bar_min_points)
+        if bar is not None:
+            stats['bar_at'] = round(bar, 2)
+            return 'rubble', bar, stats
     return None, None, stats
+
+
+def _bar_ahead(x, bump, x_min, x_max, bar_len, bar_frac, min_points, step=0.05):
+    """Nearest x where a bar_len-long strip across the path is mostly bumps, or None."""
+    start = x_min
+    while start + bar_len <= x_max + 1e-9:
+        sel = (x >= start) & (x < start + bar_len)
+        n = int(sel.sum())
+        if n >= min_points and bump[sel].mean() > bar_frac:
+            return float(x[sel & bump].min())
+        start += step
+    return None
 
 
 def surface_wrinkle_mm(pts, floor_z, x_max=1.4, half_width=0.3, layer_m=0.15,
