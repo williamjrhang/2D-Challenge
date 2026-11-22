@@ -68,3 +68,9 @@ special_obstacles:
     backoff_s: 2.0
     max_time_s: 45.0
     wall_stop_m: 0.45               # rubble/potholes crossing stops when a wall is this close (depth)
+    # Rubble / potholes follow the DETECTOR: high step while terrain is seen ahead, then
+    # terrain_clear_extra_m more once the floor ahead is clear for terrain_clear_s.
+    terrain_follow: true
+    terrain_clear_s: 1.0
+    terrain_clear_extra_m: 0.7
+    terrain_max_factor: 1.6         # never walk more than this x the fixed distance

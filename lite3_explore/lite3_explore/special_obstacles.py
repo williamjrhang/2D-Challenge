@@ -134,6 +134,15 @@ class SpecialObstacles(Node):
         # base_link (robot nose is ~0.3 m ahead of base_link). Not for curtain / stairs: the
         # camera sees the curtain and the steps as walls.
         p('wall_stop_m', 0.45)
+        # Rubble / potholes: follow the DETECTOR instead of a fixed distance (22/11). Keep the
+        # terrain gait while rubble/potholes are still detected ahead; once the floor ahead is
+        # clear for terrain_clear_s, walk terrain_clear_extra_m more (floor check looks from
+        # 0.4 m ahead + the back legs are still on it) and finish. No detector data -> the
+        # fixed walk distance as before. Never more than terrain_max_factor x that distance.
+        p('terrain_follow', True)
+        p('terrain_clear_s', 1.0)
+        p('terrain_clear_extra_m', 0.7)
+        p('terrain_max_factor', 1.6)
 
         self.P = {name: self.get_parameter(name).value for name in names}
 
@@ -217,6 +226,7 @@ class SpecialObstacles(Node):
             # so the rubble's own blocks looked >= 20 cm tall and stopped the crossing after
             # ~0.35 m (live 22/11). Ignore 'walls' until the robot is past the cell.
             self.wall_free_m = (dist or 0.0) + self.P[f'{cmd}_length_m']
+            self.min_walk_m = (dist or 0.0) + 0.3      # at least onto the terrain
             if dist is not None:
                 self.walk_m = max(self.walk_m,
                                   dist + self.P[f'{cmd}_length_m'] + self.P['tail_m'])
@@ -406,7 +416,20 @@ class SpecialObstacles(Node):
         if self.in_phase_s() >= 2.0:   # give the robot time to change gait / enter AI
             self.begin_cross()
 
+    def terrain_ahead(self):
+        """True / False = rubble or potholes detected ahead in the latest detector frame;
+        None = no fresh detector data (then the fixed distance is used)."""
+        if self.last_dets is None or self.now_s() - self.last_dets[0] > 1.5:
+            return None
+        for d in self.last_dets[1]:
+            if d.get('kind') in ('rubble', 'potholes') and (
+                    d.get('trigger') or 0.0 < d.get('forward_m', 99.0) <= 1.2):
+                return True
+        return False
+
     def begin_cross(self):
+        self.last_terrain_seen = self.now_s()     # it was seen to start this crossing
+        self.clear_from = None
         self.update_pose()
         self.start_xy = self.xy
         self.start_yaw = self.yaw if self.xy is not None else None
@@ -481,7 +504,38 @@ class SpecialObstacles(Node):
                 elif (now - self.level_since > self.P['level_hold_s']
                       and dist(self.P['stairs_min_distance_m'])):
                     self.finish('success')
+        elif self.kind in ('rubble', 'potholes') and self.P['terrain_follow']:
+            self.follow_terrain(now, dist)
         elif dist(self.walk_m):
+            self.finish('success')
+
+    def follow_terrain(self, now, dist):
+        """Rubble / potholes: stay in the terrain gait while terrain is detected ahead."""
+        walked = self.travelled()
+        ahead = self.terrain_ahead()
+        if ahead is None:                            # detector silent: fixed distance
+            if dist(self.walk_m):
+                self.finish('success')
+            return
+        if ahead:
+            self.last_terrain_seen = now
+            if self.clear_from is not None:
+                self.get_logger().info(f'{self.kind}: more terrain ahead, keep going')
+            self.clear_from = None
+        if dist(self.walk_m * self.P['terrain_max_factor']):
+            self.get_logger().warn(f'{self.kind}: max distance {walked:.2f} m, finishing')
+            self.finish('success')
+            return
+        if walked < getattr(self, 'min_walk_m', 0.0) or ahead:
+            return
+        if now - self.last_terrain_seen < self.P['terrain_clear_s']:
+            return
+        if self.clear_from is None:
+            self.clear_from = walked
+            self.get_logger().info(f'{self.kind}: floor ahead clear at {walked:.2f} m, '
+                                   f'walking {self.P["terrain_clear_extra_m"]:.1f} m off it')
+        if walked - self.clear_from >= self.P['terrain_clear_extra_m']:
+            self.get_logger().info(f'{self.kind}: off the terrain after {walked:.2f} m')
             self.finish('success')
 
     def do_abort(self):
