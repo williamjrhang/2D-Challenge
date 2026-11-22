@@ -78,7 +78,10 @@ class MissionController(Node):
         p('look_cooldown_s', 5.0)           # ignore new look events right after a look
         # APPROACH: drive on purpose to obstacles the camera saw (the lidar sees the curtain /
         # rubble as a wall, so the explorer never plans a path through them).
-        p('approach_kinds', ['stairs', 'curtain', 'rubble'])  # remove 'stairs' to never go to stairs
+        # Only rubble (22/11: YOLO-World 'curtains' near the start sent the robot back 3x, all
+        # 'not confirmed up close'; a false 'stairs' would switch on AI mode). A real curtain or
+        # stairs is still crossed when the robot is right in front of it.
+        p('approach_kinds', ['rubble'])
         p('approach_min_sightings', 3)     # seen this many times before we drive there
         p('approach_merge_m', 0.8)         # sightings closer than this = same obstacle
         p('approach_standoff_m', 0.6)      # stop this far before it (base_link; nose is ~0.3 m ahead)

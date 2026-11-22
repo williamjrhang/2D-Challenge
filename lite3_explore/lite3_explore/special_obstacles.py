@@ -209,9 +209,14 @@ class SpecialObstacles(Node):
         else:
             self.get_logger().info(f'Using odometry {self.odom_src}')
         self.kind = cmd
+        self.wall_free_m = 0.0               # wall stop only after walking this far
         if cmd != 'stairs':
             self.walk_m = self.P[f'{cmd}_distance_m']
             dist = self.measured_distance(cmd)
+            # The wall stop is for the wall BEHIND the cell. On the rubble the body is higher,
+            # so the rubble's own blocks looked >= 20 cm tall and stopped the crossing after
+            # ~0.35 m (live 22/11). Ignore 'walls' until the robot is past the cell.
+            self.wall_free_m = (dist or 0.0) + self.P[f'{cmd}_length_m']
             if dist is not None:
                 self.walk_m = max(self.walk_m,
                                   dist + self.P[f'{cmd}_length_m'] + self.P['tail_m'])
@@ -442,6 +447,7 @@ class SpecialObstacles(Node):
 
         # Wall right ahead (rubble / potholes only): stop here, the cell is behind us.
         if self.kind in ('rubble', 'potholes') and self.wall is not None \
+                and self.travelled() >= self.wall_free_m \
                 and now - self.wall[0] < 1.5 and 0.0 < self.wall[1] < self.P['wall_stop_m']:
             self.get_logger().warn(f'{self.kind}: wall {self.wall[1]:.2f} m ahead, '
                                    f'stopping the crossing here')
