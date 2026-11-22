@@ -29,7 +29,7 @@ special_obstacles:
     gait_via_manual: false
     ai_enter_code: 553714984        # 0x21010528 Enter AI
     ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
-    ai_auto_code: 0                 # OFF (22 Nov): re-sending auto after Enter AI switched AI OFF -> climbed in the normal gait and tipped 36 deg
+    ai_auto_code: 553716739         # 0x21010C03 auto, re-sent 1 s after Enter AI: without it AI mode ignores code commands (22 Nov). 0 = off
     stairs_progress_window_s: 10.0  # stairs only: must move stairs_min_progress_m in this time
     stairs_min_progress_m: 0.05
     stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
@@ -37,7 +37,7 @@ special_obstacles:
     potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 
     # ---- Speeds (m/s): start slow, raise only after it works ----
-    stairs_speed: 0.13              # 22 Nov AI mode: 0.03 and 0.10 did not move, 0.15 'flew' (roll 36 deg); trying 0.13
+    stairs_speed: 0.14              # 22 Nov AI mode: 0.03 / 0.10 / 0.13 did not move, 0.15 moved (climbed, tipped 36 deg)
     stairs_max_roll_deg: 20.0       # abort when tipping sideways this much on the stairs
     rubble_speed: 0.12
     curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)

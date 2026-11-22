@@ -89,7 +89,7 @@ class SpecialObstacles(Node):
         # 22/11: in AI mode the robot ignored /cmd_vel from code (joystick in manual mode
         # worked). Entering AI may hand control back to the controller, so send AUTO again
         # 1 s after Enter AI. 0 = don't.
-        p('ai_auto_code', 0)                 # 0x21010C03 = 553716739. OFF: it switched AI mode off (22/11)
+        p('ai_auto_code', 553716739)         # 0x21010C03 auto, re-sent after Enter AI (22/11)
         # Stairs-only progress check: climbing the first step is slow.
         p('stairs_progress_window_s', 10.0)
         p('stairs_min_progress_m', 0.05)
@@ -98,7 +98,7 @@ class SpecialObstacles(Node):
         p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
-        p('stairs_speed', 0.13)              # 22/11: 0.15 'flew' in AI mode (roll 36 deg)
+        p('stairs_speed', 0.14)              # 22/11: 0.15 'flew' in AI mode (roll 36 deg)
         p('rubble_speed', 0.12)
         p('curtain_speed', 0.10)
         p('potholes_speed', 0.10)
