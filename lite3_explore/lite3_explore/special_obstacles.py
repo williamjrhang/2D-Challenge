@@ -98,7 +98,7 @@ class SpecialObstacles(Node):
         p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
-        p('stairs_speed', 0.05)              # 22/11: 0.15 'flew' in AI mode (roll 36 deg)
+        p('stairs_speed', 0.03)              # 22/11: 0.15 'flew' in AI mode (roll 36 deg)
         p('rubble_speed', 0.12)
         p('curtain_speed', 0.10)
         p('potholes_speed', 0.10)
