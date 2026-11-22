@@ -124,6 +124,9 @@ class SpecialObstacles(Node):
         # Safety
         p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
         p('stairs_max_pitch_deg', 40.0)      # stairs climb steeper than 25 deg; roll limit stays
+        # Curtain: the floor is flat, so a big tilt means climbing / pushing a WALL (22/11: a
+        # false curtain crossing reached roll 27 / pitch 23 deg and the robot sat down).
+        p('curtain_max_tilt_deg', 12.0)
         p('settle_s', 1.0)
         p('progress_window_s', 6.0)          # must move min_progress_m in this time
         p('min_progress_m', 0.10)
@@ -219,6 +222,7 @@ class SpecialObstacles(Node):
             self.get_logger().info(f'Using odometry {self.odom_src}')
         self.kind = cmd
         self.wall_free_m = 0.0               # wall stop only after walking this far
+        self.start_dist = 0.0                # measured distance to the terrain at the start
         if cmd != 'stairs':
             self.walk_m = self.P[f'{cmd}_distance_m']
             dist = self.measured_distance(cmd)
@@ -226,12 +230,22 @@ class SpecialObstacles(Node):
             # so the rubble's own blocks looked >= 20 cm tall and stopped the crossing after
             # ~0.35 m (live 22/11). Ignore 'walls' until the robot is past the cell.
             self.wall_free_m = (dist or 0.0) + self.P[f'{cmd}_length_m']
+            self.start_dist = dist or 0.0
             self.min_walk_m = (dist or 0.0) + 0.3      # at least onto the terrain
             if dist is not None:
                 self.walk_m = max(self.walk_m,
                                   dist + self.P[f'{cmd}_length_m'] + self.P['tail_m'])
             self.get_logger().info(f'{cmd}: starts {dist} m ahead -> walk {self.walk_m:.2f} m')
         self.start_time = self.now_s()
+        # 'Rubble' / 'potholes' right at a wall = the bottom of the wall, not terrain (22/11:
+        # false rubble at the start pushed the wall for 18 s). Don't walk into it.
+        if cmd in ('rubble', 'potholes') and self.wall is not None \
+                and self.now_s() - self.wall[0] < 1.5 \
+                and 0.0 < self.wall[1] < max(self.start_dist, self.P['wall_stop_m']) + 0.25:
+            self.get_logger().warn(f'{cmd}: wall {self.wall[1]:.2f} m ahead, at the {cmd} '
+                                   f'({self.start_dist:.2f} m): not terrain, NOT crossing')
+            self.report('failed')
+            return
         self.get_logger().info(f'Starting {cmd} crossing.')
         self.set_phase('SETTLE')
 
@@ -371,7 +385,8 @@ class SpecialObstacles(Node):
 
         # Safety first, in every phase except backing off
         if self.phase in ('SETTLE', 'GAIT', 'CROSS'):
-            limit = math.radians(self.P['max_tilt_deg'])
+            limit = math.radians(self.P['curtain_max_tilt_deg'] if self.kind == 'curtain'
+                                 else self.P['max_tilt_deg'])
             pitch_limit = (math.radians(self.P['stairs_max_pitch_deg'])
                            if self.kind == 'stairs' else limit)
             if abs(self.roll) > limit or abs(self.pitch) > pitch_limit:
@@ -470,7 +485,8 @@ class SpecialObstacles(Node):
 
         # Wall right ahead (rubble / potholes only): stop here, the cell is behind us.
         if self.kind in ('rubble', 'potholes') and self.wall is not None \
-                and self.travelled() >= self.wall_free_m \
+                and (self.travelled() < self.start_dist - 0.1
+                     or self.travelled() >= self.wall_free_m) \
                 and now - self.wall[0] < 1.5 and 0.0 < self.wall[1] < self.P['wall_stop_m']:
             self.get_logger().warn(f'{self.kind}: wall {self.wall[1]:.2f} m ahead, '
                                    f'stopping the crossing here')

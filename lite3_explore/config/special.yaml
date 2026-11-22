@@ -68,6 +68,7 @@ special_obstacles:
     backoff_s: 2.0
     max_time_s: 45.0
     wall_stop_m: 0.45               # rubble/potholes crossing stops when a wall is this close (depth)
+    curtain_max_tilt_deg: 12.0      # curtain floor is flat: more tilt = pushing a wall -> abort
     # Rubble / potholes follow the DETECTOR: high step while terrain is seen ahead, then
     # terrain_clear_extra_m more once the floor ahead is clear for terrain_clear_s.
     terrain_follow: true

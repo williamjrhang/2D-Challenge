@@ -21,7 +21,7 @@ obstacle_detector:
     # Detection
     conf: 0.25
     closeup_conf: 0.08            # curtain box covering most of the image: accepted this low
-    closeup_area: 0.7
+    closeup_area: 1.01            # 22/11: close-up rule OFF (fired on a wall at 8% conf); was 0.7
     trigger_distance_m: 1.2       # stairs / rubble / potholes closer than this ...
     path_half_width_m: 0.5        # ... and within this of the robot's centre line
     curtain_trigger_m: 0.7        # curtain: only this close, and only with depth
