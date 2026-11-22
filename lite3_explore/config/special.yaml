@@ -32,7 +32,8 @@ special_obstacles:
     ai_auto_code: 553716739         # 0x21010C03 auto, re-sent 1 s after Enter AI: without it AI mode ignores code commands (22 Nov). 0 = off
     stairs_progress_window_s: 10.0  # stairs only: must move stairs_min_progress_m in this time
     stairs_min_progress_m: 0.05
-    stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
+    stairs_max_pitch_deg: 45.0      # 22 Nov: a step briefly pitched 40 deg and aborted
+    tilt_hold_s: 0.5                # tilt must stay over the limit this long to abort (step peaks are brief)
     rubble_gait_code: 553714695   # 0x21010407 RUG H-Step (was 0x21010401 RUG General, changed 22 Nov at the team's request)
     potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 

@@ -130,7 +130,8 @@ class SpecialObstacles(Node):
 
         # Safety
         p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
-        p('stairs_max_pitch_deg', 40.0)      # stairs climb steeper than 25 deg
+        p('stairs_max_pitch_deg', 45.0)      # 22/11: a step briefly pitched 40 deg and aborted
+        p('tilt_hold_s', 0.5)                # tilt must stay over the limit this long to abort
         p('stairs_max_roll_deg', 20.0)       # 22/11: tipped to 36 deg sideways at 0.15 m/s in AI
         # Curtain: the floor is flat, so a big tilt means climbing / pushing a WALL (22/11: a
         # false curtain crossing reached roll 27 / pitch 23 deg and the robot sat down).
@@ -229,6 +230,7 @@ class SpecialObstacles(Node):
         else:
             self.get_logger().info(f'Using odometry {self.odom_src}')
         self.kind = cmd
+        self.tilt_since = None
         self.wall_free_m = 0.0               # wall stop only after walking this far
         self.start_dist = 0.0                # measured distance to the terrain at the start
         if cmd != 'stairs':
@@ -400,7 +402,13 @@ class SpecialObstacles(Node):
                                  else self.P['max_tilt_deg'])
             pitch_limit = (math.radians(self.P['stairs_max_pitch_deg'])
                            if self.kind == 'stairs' else limit)
-            if abs(self.roll) > limit or abs(self.pitch) > pitch_limit:
+            over = abs(self.roll) > limit or abs(self.pitch) > pitch_limit
+            if not over:
+                self.tilt_since = None
+            elif getattr(self, 'tilt_since', None) is None:
+                self.tilt_since = self.now_s()     # brief peak while stepping: wait tilt_hold_s
+            if over and self.now_s() - self.tilt_since >= self.P['tilt_hold_s']:
+                self.tilt_since = None
                 self.abort(f'tilt roll={math.degrees(self.roll):.0f} '
                            f'pitch={math.degrees(self.pitch):.0f} deg')
             elif self.now_s() - self.start_time > (self.P['stairs_max_time_s']
@@ -577,8 +585,9 @@ class SpecialObstacles(Node):
             self.finish('success')
 
     def do_abort(self):
-        # Back off slowly and straight, then report failure
-        if self.in_phase_s() < self.P['backoff_s']:
+        # Back off slowly and straight, then report failure. NOT on the stairs: backing
+        # down steps is dangerous (22/11) -> just stop.
+        if self.kind != 'stairs' and self.in_phase_s() < self.P['backoff_s']:
             self.drive(-abs(self.P['backoff_speed']))
         else:
             self.finish('failed')
