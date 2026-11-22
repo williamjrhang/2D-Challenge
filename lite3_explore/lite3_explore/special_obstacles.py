@@ -241,7 +241,9 @@ class SpecialObstacles(Node):
         # false rubble at the start pushed the wall for 18 s). Don't walk into it.
         if cmd in ('rubble', 'potholes') and self.wall is not None \
                 and self.now_s() - self.wall[0] < 1.5 \
-                and 0.0 < self.wall[1] < max(self.start_dist, self.P['wall_stop_m']) + 0.25:
+                and 0.0 < self.wall[1] < max(self.start_dist, self.P['wall_stop_m']) + 0.10:
+            # +0.10: the wall is AT the 'terrain' (its bottom). A 'wall' further behind the
+            # terrain start is the rubble's own tall blocks (22/11: 0.71 m vs 0.54 m = real rubble)
             self.get_logger().warn(f'{cmd}: wall {self.wall[1]:.2f} m ahead, at the {cmd} '
                                    f'({self.start_dist:.2f} m): not terrain, NOT crossing')
             self.report('failed')
