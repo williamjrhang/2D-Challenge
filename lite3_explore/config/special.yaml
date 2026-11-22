@@ -37,7 +37,7 @@ special_obstacles:
     potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 
     # ---- Speeds (m/s): start slow, raise only after it works ----
-    stairs_speed: 0.10              # 22 Nov AI mode: 0.03 did not move, 0.15 'flew' (roll 36 deg); trying 0.10
+    stairs_speed: 0.13              # 22 Nov AI mode: 0.03 and 0.10 did not move, 0.15 'flew' (roll 36 deg); trying 0.13
     stairs_max_roll_deg: 20.0       # abort when tipping sideways this much on the stairs
     rubble_speed: 0.12
     curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)
