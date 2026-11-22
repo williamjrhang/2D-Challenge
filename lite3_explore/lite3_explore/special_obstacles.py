@@ -86,12 +86,19 @@ class SpecialObstacles(Node):
         p('stairs_use_ai_mode', True)
         p('ai_enter_code', 553714984)        # 0x21010528 Enter AI
         p('ai_exit_code', 553714987)         # 0x2101052B Exit AI
+        # 22/11: in AI mode the robot ignored /cmd_vel from code (joystick in manual mode
+        # worked). Entering AI may hand control back to the controller, so send AUTO again
+        # 1 s after Enter AI. 0 = don't.
+        p('ai_auto_code', 553716739)         # 0x21010C03 auto (same as lite3_auto)
+        # Stairs-only progress check: climbing the first step is slow.
+        p('stairs_progress_window_s', 10.0)
+        p('stairs_min_progress_m', 0.05)
         # Fallback only: true = switch manual -> gait -> auto. Gait codes DO work in auto
         # mode; on 18/11 they were dropped by a /simple_cmd QoS mismatch (fixed in gait.py).
         p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
-        p('stairs_speed', 0.10)
+        p('stairs_speed', 0.15)
         p('rubble_speed', 0.12)
         p('curtain_speed', 0.10)
         p('potholes_speed', 0.10)
@@ -411,6 +418,7 @@ class SpecialObstacles(Node):
             if self.kind == 'stairs' and self.P['stairs_use_ai_mode']:
                 self.send_gait(self.P['ai_enter_code'])
                 self.in_ai = True
+                self.ai_auto_sent = False
                 self.get_logger().info('stairs: AI mode ON')
                 self.set_phase('GAIT')
                 return
@@ -430,6 +438,12 @@ class SpecialObstacles(Node):
                 and self.in_phase_s() >= 1.0):
             self.send_gait(self.gait_code_for(self.kind))
             self.gait_resent = True
+        # AI mode: re-assert AUTO (ROS commands) 1 s after Enter AI.
+        if (self.in_ai and self.P['ai_auto_code'] and not getattr(self, 'ai_auto_sent', True)
+                and self.in_phase_s() >= 1.0):
+            self.send_gait(self.P['ai_auto_code'])
+            self.ai_auto_sent = True
+            self.get_logger().info('stairs: AUTO re-sent after entering AI mode')
         if self.in_phase_s() >= 2.0:   # give the robot time to change gait / enter AI
             self.begin_cross()
 
@@ -478,10 +492,14 @@ class SpecialObstacles(Node):
 
         # Moving at all? (only measurable with odometry)
         if self.xy is not None and self.window_xy is not None \
-                and now - self.window_start > self.P['progress_window_s']:
+                and now - self.window_start > (self.P['stairs_progress_window_s']
+                                               if self.kind == 'stairs'
+                                               else self.P['progress_window_s']):
             moved = math.hypot(self.xy[0] - self.window_xy[0], self.xy[1] - self.window_xy[1])
-            if moved < self.P['min_progress_m']:
-                self.abort(f'only moved {moved:.2f} m in {self.P["progress_window_s"]:.0f} s')
+            need = (self.P['stairs_min_progress_m'] if self.kind == 'stairs'
+                    else self.P['min_progress_m'])
+            if moved < need:
+                self.abort(f'only moved {moved:.2f} m in {now - self.window_start:.0f} s')
                 return
             self.window_start, self.window_xy = now, self.xy
 

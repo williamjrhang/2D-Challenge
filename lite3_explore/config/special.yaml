@@ -29,12 +29,15 @@ special_obstacles:
     gait_via_manual: false
     ai_enter_code: 553714984        # 0x21010528 Enter AI
     ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
+    ai_auto_code: 553716739         # 0x21010C03 auto, re-sent 1 s after Enter AI (22 Nov: AI mode ignored code commands). 0 = off
+    stairs_progress_window_s: 10.0  # stairs only: must move stairs_min_progress_m in this time
+    stairs_min_progress_m: 0.05
     stairs_max_pitch_deg: 40.0      # stairs are steeper than max_tilt_deg; roll limit unchanged
     rubble_gait_code: 553714695   # 0x21010407 RUG H-Step (was 0x21010401 RUG General, changed 22 Nov at the team's request)
     potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 
     # ---- Speeds (m/s): start slow, raise only after it works ----
-    stairs_speed: 0.10
+    stairs_speed: 0.15              # was 0.10 (22 Nov): robot did not move in AI mode
     rubble_speed: 0.12
     curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)
     potholes_speed: 0.10
