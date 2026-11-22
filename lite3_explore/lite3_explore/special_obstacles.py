@@ -98,7 +98,7 @@ class SpecialObstacles(Node):
         p('gait_via_manual', False)
 
         # Speeds (m/s) - start SLOW
-        p('stairs_speed', 0.15)
+        p('stairs_speed', 0.05)              # 22/11: 0.15 'flew' in AI mode (roll 36 deg)
         p('rubble_speed', 0.12)
         p('curtain_speed', 0.10)
         p('potholes_speed', 0.10)
@@ -130,7 +130,8 @@ class SpecialObstacles(Node):
 
         # Safety
         p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
-        p('stairs_max_pitch_deg', 40.0)      # stairs climb steeper than 25 deg; roll limit stays
+        p('stairs_max_pitch_deg', 40.0)      # stairs climb steeper than 25 deg
+        p('stairs_max_roll_deg', 20.0)       # 22/11: tipped to 36 deg sideways at 0.15 m/s in AI
         # Curtain: the floor is flat, so a big tilt means climbing / pushing a WALL (22/11: a
         # false curtain crossing reached roll 27 / pitch 23 deg and the robot sat down).
         p('curtain_max_tilt_deg', 12.0)
@@ -395,6 +396,7 @@ class SpecialObstacles(Node):
         # Safety first, in every phase except backing off
         if self.phase in ('SETTLE', 'GAIT', 'CROSS'):
             limit = math.radians(self.P['curtain_max_tilt_deg'] if self.kind == 'curtain'
+                                 else self.P['stairs_max_roll_deg'] if self.kind == 'stairs'
                                  else self.P['max_tilt_deg'])
             pitch_limit = (math.radians(self.P['stairs_max_pitch_deg'])
                            if self.kind == 'stairs' else limit)
