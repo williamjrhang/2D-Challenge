@@ -132,6 +132,12 @@ class SpecialObstacles(Node):
         p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
         p('stairs_max_pitch_deg', 45.0)      # 22/11: a step briefly pitched 40 deg and aborted
         p('tilt_hold_s', 0.5)                # tilt must stay over the limit this long to abort
+        # 22/11: AI mode climbed to the platform, then stood still at the top edge (needs a
+        # stronger push to step down). Stalled on the stairs for stairs_stall_s -> speed
+        # +stairs_boost_step, up to stairs_max_speed; back down as soon as it moves again.
+        p('stairs_stall_s', 4.0)
+        p('stairs_boost_step', 0.02)
+        p('stairs_max_speed', 0.20)
         p('stairs_max_roll_deg', 20.0)       # 22/11: tipped to 36 deg sideways at 0.15 m/s in AI
         # Curtain: the floor is flat, so a big tilt means climbing / pushing a WALL (22/11: a
         # false curtain crossing reached roll 27 / pitch 23 deg and the robot sat down).
@@ -364,6 +370,14 @@ class SpecialObstacles(Node):
 
     def finish(self, result):
         self.stop_robot()
+        if self.in_ai and self.kind == 'stairs' and result == 'failed':
+            # 22/11: an abort on top of the stairs switched AI off -> normal gait on the steps.
+            # Stay in AI mode and stand still; a person finishes with the joystick.
+            self.in_ai = False                     # no longer ours to manage
+            self.get_logger().error('stairs: stopped ON the stairs, AI mode stays ON. '
+                                    'Finish with the joystick (lite3_manual), then exit AI.')
+            self.report(result)
+            return
         if self.in_ai:
             # Leave AI mode, stand still, then normal gait, THEN report (see do_restore).
             self.send_gait(self.P['ai_exit_code'])
@@ -469,6 +483,7 @@ class SpecialObstacles(Node):
         return False
 
     def begin_cross(self):
+        self.stall_xy = None                       # stairs push restarts
         self.last_terrain_seen = self.now_s()     # it was seen to start this crossing
         self.clear_from = None
         self.update_pose()
@@ -487,11 +502,31 @@ class SpecialObstacles(Node):
         mode = f'odometry {self.odom_src}' if self.xy is not None else 'TIME (no odometry)'
         self.get_logger().info(f'{self.kind}: crossing, distance by {mode}')
 
+    def stairs_push(self, now, base):
+        """Stairs: if the robot has not moved for stairs_stall_s, push a little harder."""
+        if self.xy is None:
+            return base
+        if getattr(self, 'stall_xy', None) is None:
+            self.stall_xy, self.stall_t, self.stairs_boost = self.xy, now, 0.0
+        if math.hypot(self.xy[0] - self.stall_xy[0], self.xy[1] - self.stall_xy[1]) >= 0.03:
+            self.stall_xy, self.stall_t = self.xy, now          # moving again
+            self.stairs_boost = max(0.0, self.stairs_boost - self.P['stairs_boost_step'])
+        elif now - self.stall_t > self.P['stairs_stall_s']:
+            top = self.P['stairs_max_speed'] - base
+            if self.stairs_boost < top:
+                self.stairs_boost = min(top, self.stairs_boost + self.P['stairs_boost_step'])
+                self.get_logger().warn(f'stairs: not moving, pushing harder: '
+                                       f'{base + self.stairs_boost:.2f} m/s')
+            self.stall_t = now
+        return base + self.stairs_boost
+
     def do_cross(self):
         # Walk straight: steer back to the starting heading
         self.update_pose()
         now = self.now_s()
         speed = self.P[f'{self.kind}_speed']
+        if self.kind == 'stairs':
+            speed = self.stairs_push(now, speed)
         turn = 0.0
         if self.xy is not None and self.start_yaw is not None:
             turn = self.P['heading_gain'] * wrap(self.start_yaw - self.yaw)
