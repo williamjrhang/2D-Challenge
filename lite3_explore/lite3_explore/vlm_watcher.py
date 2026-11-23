@@ -60,13 +60,15 @@ if there are not enough clues (e.g. only bare walls or a corridor).
 HAZARD SIGNS - report ONLY these 5 warning symbols (usually a yellow triangle with a black symbol):
 - high_voltage: lightning bolt / electric arrow
 - radioactive: trefoil (three blades around a central dot)
-- chemical: chemical / corrosive symbol (liquid dripping from test tubes onto a hand and a surface,
-  a flask, or skull and crossbones)
+- chemical: three small solid balls joined by short lines to a central point, like a molecule
+  (chemical weapon / chemical agent symbol); also a corrosive or toxic chemical symbol
 - biological: biohazard symbol (three interlocking circles)
 - flammable: flame (fire) above a line
 NEVER report these look-alike signs, they are distractors: <DISTRACTORS>.
-Careful: a flame is flammable but an exploding ball or bomb is a distractor; a three-blade trefoil
-is radioactive but an antenna or radio waves is a distractor. If unsure, do not report the sign.
+Careful: a flame is flammable but a starburst (spiky sun-like burst around a circle) or exploding
+bomb is a distractor; a three-blade trefoil is radioactive but an antenna with radio waves is a
+distractor; three balls joined like a molecule is chemical but a starburst is not. If unsure, do
+not report the sign.
 
 SURVIVORS: in this arena survivors are PICTURES or MODELS of people: a printed photo or poster
 pasted on a wall (usually a room's left or right wall), a drawing, a picture on a screen, a doll,

@@ -27,14 +27,15 @@ scene_types: [clothes_shop, fitness_centre, kitchen, market, workshop, clinic, c
 hazard_labels: [high_voltage, radioactive, chemical, biological, flammable]
 object_labels: [medical_kit, hand_tools, food, water, utensils]
 
-# Signs that look like hazards but must NEVER be reported (booklet v6.1). Used in the prompt.
+# Signs that look like hazards but must NEVER be reported (booklet v6.1 p.6 shows 10 signs: valid =
+# radioactive, high voltage, biohazard, chemical (molecule: 3 balls joined); flammable not pictured).
 hazard_distractors:
   - 'exclamation mark "!" (general warning)'
   - magnet (magnetic field)
   - laser (laser beam)
   - non-ionising radiation (antenna / radio waves)
   - wave or flood
-  - explosion (exploding ball / bomb)
+  - starburst / explosion (spiky sun-like burst around a circle, exploding ball)
 
 # What each room usually contains (prompt hints for the scene server). Rooms are toy play sets
 # (photos 23 Nov: market = toy checkout + cart, workshop = toy workbench, kitchen = toy oven,
