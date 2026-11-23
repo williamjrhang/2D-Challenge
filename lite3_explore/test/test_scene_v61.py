@@ -269,3 +269,20 @@ def test_scene_box_places_the_room_vote():
     assert scene_box({'scene_box': [0.548, 0.092, 0.945, 0.373]}) == [0.548, 0.092, 0.945, 0.373]
     assert scene_box({'scene_box': None}) is None and scene_box({}) is None
     assert 'scene_box' in build_prompt(REAL)
+
+
+def test_booklet_v61_example_missions():
+    assert mission('A damaged electrical installation has been reported. Find the affected area '
+                   'and identify the warning sign displayed nearby') == \
+        {'task_type': 'hazard', 'target': 'high_voltage'}
+    assert mission('The rescue team needs medical supplies to treat injured survivors. Find a '
+                   'location where medical equipment may be available') == \
+        {'task_type': 'object', 'target': 'medical_kit'}
+    assert mission("A survivor is believed to be in the right side of the room for food "
+                   "preparation. Locate the room, find the survivor, and report the survivor's "
+                   "location. Find all other survivors") == \
+        {'task_type': 'survivor', 'target': 'kitchen'}
+    assert mission('The first survivor may be able to share useful information. Gather and '
+                   'report this information') == {'task_type': 'qr', 'target': None}
+    assert mission('Locate and report the location of another survivor') == \
+        {'task_type': 'survivor', 'target': 'from_qr'}

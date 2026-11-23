@@ -154,7 +154,7 @@ SYNONYMS = {
 }
 SURVIVOR_WORDS = r'\b(survivors?|victims?|persons?|people|friends?|casualty|casualties)\b'
 OTHER_WORDS = r'\b(other|another|second|friend|mentioned|named|indicated|from_qr)\b'
-QR_WORDS = r'\b(qr|message|code)\b'
+QR_WORDS = r'\b(qr|message|code|information|info|clue|cue|share|decode)\b'
 
 
 def _norm(text):
