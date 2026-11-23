@@ -44,38 +44,115 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 
 from lite3_explore.locator import Locator
-from lite3_explore.mission_config import load_mission
+from lite3_explore.mission_config import load_mission, range_weight
 
 MAX_W, MAX_H = 1024, 768
 
-PROMPT = """Analyze the attached image from a ground robot's front camera.
+PROMPT = """Analyze this image from a small ground robot's front camera in a search-and-rescue
+competition arena. The arena is a maze of 1 m x 1 m rooms with wooden walls. Rooms are furnished
+with miniature, toy, cardboard or printed props; interpret props as the real things they represent.
 
-COMPETITION CONTEXT:
-This image comes from a simulated post-disaster robotics competition arena.
-The environment may use miniature, toy, cardboard, or printed props to represent
-real objects, rooms, equipment, supplies, people and warning signs. Interpret these
-props according to the real-world things they clearly represent. Survivors may be
-dolls, figurines, mannequins or printed pictures of people.
+ROOM TYPES (scene_type) and what they typically contain:
+<ROOM_HINTS>
+Judge the room that fills most of the image (the nearest room you are looking into). Use "unknown"
+if there are not enough clues (e.g. only bare walls or a corridor).
+
+HAZARD SIGNS - report ONLY these 5 warning symbols (usually a yellow triangle with a black symbol):
+- high_voltage: lightning bolt / electric arrow
+- radioactive: trefoil (three blades around a central dot)
+- chemical: chemical / corrosive symbol (liquid dripping from test tubes onto a hand and a surface,
+  a flask, or skull and crossbones)
+- biological: biohazard symbol (three interlocking circles)
+- flammable: flame (fire) above a line
+NEVER report these look-alike signs, they are distractors: <DISTRACTORS>.
+Careful: a flame is flammable but an exploding ball or bomb is a distractor; a three-blade trefoil
+is radioactive but an antenna or radio waves is a distractor. If unsure, do not report the sign.
+
+SURVIVORS: in this arena survivors are PICTURES or MODELS of people: a printed photo or poster
+pasted on a wall (usually a room's left or right wall), a drawing, a picture on a screen, a doll,
+toy figure or figurine. Every such picture or model of a person counts as a survivor, even if it
+shows a real-looking adult. Do NOT count the actual living people physically present around the
+robot (spectators' legs, feet, shoes, hands holding things, people standing in the background)
+- only report the picture or model.
+
+OBJECTS of interest: medical_kit (first-aid kit, red-cross box), hand_tools (hammer, screwdriver,
+wrench, pliers), food (fruit, bread, cans, packaged food), water (water bottles), utensils
+(cutlery, spoons, forks, ladles).
 
 Return exactly one JSON object with exactly these keys:
-"scene_type", "scene_confidence", "hazard_label", "hazard_box", "survivor_visible",
-"survivor_box", "objects", "qr_visible", "evidence".
+{"scene_type": one of <SCENE_TYPES> or "unknown",
+ "scene_confidence": number 0.0-1.0,
+ "scene_box": [x1, y1, x2, y2] around the props that show the room type, or null if "unknown",
+ "hazards": [{"label": one of <HAZARD_LABELS>, "box": [x1, y1, x2, y2], "confidence": 0.0-1.0}],
+ "survivors": [{"box": [x1, y1, x2, y2], "confidence": 0.0-1.0}],
+ "objects": [{"label": one of <OBJECT_LABELS>, "box": [x1, y1, x2, y2], "confidence": 0.0-1.0}],
+ "qr_visible": true or false}
+Boxes are fractions 0.0-1.0 of the image width/height (x right, y down). Use empty lists if none.
+Only report things that are clearly visible; never invent objects or coordinates.
+Output valid JSON only. No Markdown, code fences, extra keys or text outside the JSON."""
 
-Definitions:
-- scene_type: one of {scene_types}. Use "unknown" if the evidence is insufficient.
-- scene_confidence: number 0.0-1.0, confidence that scene_type is correct.
-- hazard_label: one of {hazard_labels} for a yellow triangular warning sign that is
-  clearly visible, otherwise "none".
-- survivor_visible: true only if a person / survivor prop is clearly visible.
-- objects: array (at most 3) of {{"label": one of {object_labels}, "box": [x1,y1,x2,y2]}}
-  for clearly visible objects of interest. Empty array if none.
-- hazard_box, survivor_box, and each object box: [x1, y1, x2, y2] with values from 0.0 to
-  1.0 as fractions of image width/height (x right, y down), or null if not visible.
-- qr_visible: true if a QR code is visible anywhere.
-- evidence: array of at most three short strings describing what you see.
 
-Output valid JSON only. No Markdown, code fences, extra keys or text outside the JSON.
-Do not infer hidden objects. Do not invent coordinates for things that are not visible."""
+def build_prompt(cfg):
+    hints = cfg.get('room_hints') or {}
+    rooms = '\n'.join(f'- {s}: {hints.get(s, "")}'.rstrip(': ') for s in cfg['scene_types'])
+    return (PROMPT.replace('<ROOM_HINTS>', rooms)
+            .replace('<DISTRACTORS>', '; '.join(cfg.get('hazard_distractors') or []))
+            .replace('<SCENE_TYPES>', json.dumps(cfg['scene_types']))
+            .replace('<HAZARD_LABELS>', json.dumps(cfg['hazard_labels']))
+            .replace('<OBJECT_LABELS>', json.dumps(cfg['object_labels'])))
+
+
+def valid_box(box):
+    if not (isinstance(box, (list, tuple)) and len(box) == 4):
+        return None
+    try:
+        b = [min(1.0, max(0.0, float(v))) for v in box]
+    except (TypeError, ValueError):
+        return None
+    if b[2] <= b[0] or b[3] <= b[1]:
+        return None
+    return b
+
+
+def clean_answer(a, cfg):
+    """Keep only what the booklet allows: [(task_type, label, box, confidence)], scene, conf.
+    Also accepts the old single-item keys (hazard_label / survivor_visible)."""
+    items = []
+    hazards = list(a.get('hazards') or [])
+    if a.get('hazard_label') not in (None, 'none'):
+        hazards.append({'label': a.get('hazard_label'), 'box': a.get('hazard_box')})
+    for h in hazards:
+        if isinstance(h, dict) and h.get('label') in cfg['hazard_labels']:
+            items.append(('hazard', h['label'], valid_box(h.get('box')), h.get('confidence')))
+    survivors = list(a.get('survivors') or [])
+    if a.get('survivor_visible'):
+        survivors.append({'box': a.get('survivor_box')})
+    for v in survivors:
+        if isinstance(v, dict):
+            items.append(('survivor', 'survivor', valid_box(v.get('box')), v.get('confidence')))
+    for o in a.get('objects') or []:
+        if isinstance(o, dict) and o.get('label') in cfg['object_labels']:
+            items.append(('object', o['label'], valid_box(o.get('box')), o.get('confidence')))
+    out = []
+    for t, label, box, conf in items:
+        try:
+            conf = float(conf) if conf is not None else 0.7
+        except (TypeError, ValueError):
+            conf = 0.7
+        out.append((t, label, box, conf))
+    scene = a.get('scene_type')
+    try:
+        sconf = float(a.get('scene_confidence') or 0.0)
+    except (TypeError, ValueError):
+        sconf = 0.0
+    if scene not in cfg['scene_types']:
+        scene, sconf = 'unknown', 0.0
+    return scene, sconf, out
+
+
+def scene_box(a):
+    """Box around the room's props (where the room is), else None."""
+    return valid_box(a.get('scene_box'))
 
 
 def encode_multipart(fields, file_field, filename, data, content_type):
@@ -109,20 +186,35 @@ class VlmWatcher(Node):
         self.declare_parameter('min_confidence', 0.6)   # ignore scene types below this
         self.declare_parameter('ask_every_m', 1.5)      # background ask after moving this far
         self.declare_parameter('ask_turn_deg', 60.0)    # ... or turning this much
+        self.declare_parameter('min_interval_s', 2.0)   # never ask more often than this
+        self.declare_parameter('ask_every_s', 0.0)      # >0: also ask on a timer, even standing
+                                                        # still (bench testing). 0 = off
+        self.declare_parameter('item_min_confidence', 0.4)
+        self.declare_parameter('photo_dir', '~/challenge_ws/reports/vlm_photos')  # '' = off
         g = lambda n: self.get_parameter(n).value
         self.cfg = load_mission(g('mission_file'))
         self.timeout = g('timeout_s')
         self.min_conf = g('min_confidence')
         self.ask_every_m = g('ask_every_m')
         self.ask_turn = math.radians(g('ask_turn_deg'))
-        self.prompt = PROMPT.format(
-            scene_types=json.dumps(self.cfg['scene_types']),
-            hazard_labels=json.dumps(self.cfg['hazard_labels']),
-            object_labels=json.dumps(self.cfg['object_labels']))
+        self.min_interval = g('min_interval_s')
+        self.ask_every_s = g('ask_every_s')
+        self.item_min_conf = g('item_min_confidence')
+        self.prompt = build_prompt(self.cfg)
+        self.next_ok = 0.0          # monotonic time before which we do not ask (429 / errors)
+        self.failures = 0
+        self.last_start = 0.0
+        self.photo = 0
+        self.photo_dir = ''
+        if g('photo_dir'):
+            import os
+            self.photo_dir = os.path.join(os.path.expanduser(g('photo_dir')),
+                                          time.strftime('%Y%m%d_%H%M%S'))
+            os.makedirs(self.photo_dir, exist_ok=True)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.locator = Locator(self, self.tf_buffer)
+        self.locator = Locator(self, self.tf_buffer, map_topic='/map')
 
         self.create_subscription(CompressedImage, g('image_topic'), self.on_image,
                                  qos_profile_sensor_data)
@@ -140,7 +232,32 @@ class VlmWatcher(Node):
         self.mission_state = None
         self.last_ask_pose = None
         self.create_timer(0.5, self.tick)
+        threading.Thread(target=self.health_check, daemon=True).start()
         self.get_logger().info(f'Scene VLM ready: {self.cfg["scene_server"]} as {self.cfg["group_id"]}')
+
+    def health_check(self):
+        """GET <server>/health until it answers (only logs, never blocks anything)."""
+        url = self.cfg['scene_server'].rsplit('/', 1)[0] + '/health'
+        for attempt in range(30):
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    body = r.read().decode(errors='replace')[:200]
+                self.get_logger().info(f'Scene server healthy: {body}')
+                return
+            except Exception as e:  # noqa: BLE001  (log and retry)
+                if attempt == 0 or attempt % 6 == 5:
+                    self.get_logger().error(f'Scene server NOT reachable ({url}): {e}')
+            time.sleep(10.0)
+
+    def can_ask(self):
+        now = time.monotonic()
+        return now >= self.next_ok and now - self.last_start >= self.min_interval
+
+    def back_off(self, seconds=None):
+        """After a 429 (seconds = Retry-After) or a failure (exponential, max 10 s)."""
+        self.failures += 1
+        wait = seconds if seconds is not None else min(10.0, 2.0 ** self.failures)
+        self.next_ok = time.monotonic() + wait
 
     def on_image(self, msg):
         self.image = msg
@@ -155,21 +272,27 @@ class VlmWatcher(Node):
             # A background ask is running; its answer will close this look too.
             self.look_wanted = True
             return
-        if not self.start(stopped=True):
+        # Server backing off (429 / down): answer at once so the robot does not wait.
+        if time.monotonic() < self.next_ok or not self.start(stopped=True):
             self.look_done_pub.publish(Bool(data=True))
 
     def tick(self):
         """Background asks while moving: only after a new view (moved or turned)."""
-        if self.busy or self.mission_state not in (None, 'EXPLORE', 'GO_TO_EXIT'):
+        if (self.busy or self.mission_state not in (None, 'EXPLORE', 'GO_TO_EXIT')
+                or not self.can_ask()):
             return
         pose = self.locator.robot_pose()
+        timed = (self.ask_every_s > 0
+                 and time.monotonic() - self.last_start >= self.ask_every_s)
         if pose is None:
+            if timed:                        # bench test without SLAM: still ask
+                self.start(stopped=False)
             return
         if self.last_ask_pose is not None:
             lx, ly, lyaw = self.last_ask_pose
             moved = math.hypot(pose[0] - lx, pose[1] - ly)
             turned = abs(math.atan2(math.sin(pose[2] - lyaw), math.cos(pose[2] - lyaw)))
-            if moved < self.ask_every_m and turned < self.ask_turn:
+            if moved < self.ask_every_m and turned < self.ask_turn and not timed:
                 return
         self.start(stopped=False)
 
@@ -177,11 +300,12 @@ class VlmWatcher(Node):
         if self.image is None:
             self.get_logger().warn('No camera image yet.')
             return False
-        snap = self.locator.snapshot()           # depth + TF + pose at photo time
+        snap = self.locator.snapshot() or self.locator.camera_snapshot()  # depth + TF + pose now
         pose = snap['pose'] if snap else self.locator.robot_pose()
         if pose is not None:
             self.last_ask_pose = pose
         self.busy = True
+        self.last_start = time.monotonic()
         self.look_wanted = stopped
         threading.Thread(target=self.look, args=(self.image, snap, pose), daemon=True).start()
         return True
@@ -192,6 +316,7 @@ class VlmWatcher(Node):
         try:
             jpeg, w, h = self.prepare(msg)
             answer = self.ask(jpeg)
+            self.save_photo(jpeg, answer)
             if answer is not None:
                 self.use(answer, w, h, snap, pose)
         except Exception as e:  # never leave the controller waiting
@@ -201,6 +326,19 @@ class VlmWatcher(Node):
             if self.look_wanted:
                 self.look_wanted = False
                 self.look_done_pub.publish(Bool(data=True))
+
+    def save_photo(self, jpeg, answer):
+        """Every photo sent + its answer, to check what the server really saw."""
+        if not self.photo_dir:
+            return
+        try:
+            name = time.strftime('%H%M%S') + f'_{self.photo + 1:03d}'
+            with open(f'{self.photo_dir}/{name}.jpg', 'wb') as f:
+                f.write(jpeg)
+            with open(f'{self.photo_dir}/{name}.json', 'w') as f:
+                json.dump(answer, f)
+        except OSError as e:
+            self.get_logger().warn(f'Cannot save photo: {e}', throttle_duration_sec=60.0)
 
     def prepare(self, msg):
         img = cv2.imdecode(np.frombuffer(bytes(msg.data), np.uint8), cv2.IMREAD_COLOR)
@@ -226,13 +364,20 @@ class VlmWatcher(Node):
             wait = e.headers.get('retry-after')
             self.get_logger().warn(f'Server HTTP {e.code}: {detail}'
                                    + (f' (retry after {wait} s)' if wait else ''))
+            try:
+                self.back_off(float(wait) if wait else (5.0 if e.code == 429 else None))
+            except ValueError:
+                self.back_off(5.0)
             return None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             self.get_logger().warn(f'Cannot reach scene server (RI_network?): {e}')
+            self.back_off()
             return None
         if not reply.get('success'):
             self.get_logger().warn(f'Server could not answer: {reply.get("error")}')
+            self.back_off()
             return None
+        self.failures = 0
         try:
             answer = parse_result(reply['result'])
         except (ValueError, KeyError):
@@ -246,35 +391,52 @@ class VlmWatcher(Node):
 
     def use(self, a, w, h, snap, pose):
         self.scene_pub.publish(String(data=json.dumps(a)))
-        scene = a.get('scene_type', 'unknown')
-        if scene not in self.cfg['scene_types'] or a.get('scene_confidence', 0) < self.min_conf:
+        scene, sconf, items = clean_answer(a, self.cfg)
+        if sconf < self.min_conf:
             scene = 'unknown'
         self.room_pub.publish(String(data=scene))
+        self.photo += 1
+        photo = self.photo
 
-        hazard = a.get('hazard_label', 'none')
-        if hazard in self.cfg['hazard_labels']:
-            self.hazard_pub.publish(String(data=hazard))
-            self.found('hazard', hazard, scene, a.get('hazard_box'), w, h, snap, pose)
-        if a.get('survivor_visible'):
-            self.found('survivor', 'survivor', scene, a.get('survivor_box'), w, h, snap, pose)
-        for obj in a.get('objects') or []:
-            if obj.get('label') in self.cfg['object_labels']:
-                self.found('object', obj['label'], scene, obj.get('box'), w, h, snap, pose)
+        # Scene vote, placed where the room's props are (scene_box), else the image centre.
+        # (Centre alone fails when e.g. rubble in front fills the middle of the picture.)
+        if scene != 'unknown':
+            b = scene_box(a) or [0.3, 0.3, 0.7, 0.7]
+            where = self.locator.place([b[0] * w, b[1] * h, b[2] * w, b[3] * h], w, h, snap,
+                                       on='wall', pull_m=0.25)
+            if where:
+                self.publish('scene', '', scene, where, sconf, photo)
+            else:
+                self.get_logger().warn(f'scene {scene}: cannot place the view (no depth/map).')
 
-    def found(self, task_type, label, scene, box, w, h, snap, pose):
-        xy, how = None, 'ahead'
-        if isinstance(box, list) and len(box) == 4 and snap is not None:
-            px = [box[0] * w, box[1] * h, box[2] * w, box[3] * h]
-            xy = self.locator.locate_box(px, w, h, snap)
-            how = 'depth'
-        if xy is None:
-            xy, how = self.locator.ahead(1.0, pose), 'ahead'
-        if xy is None:
-            self.get_logger().warn(f'{task_type} {label}: no robot pose, cannot place it.')
-            return
+        for task_type, label, box, conf in items:
+            if conf < self.item_min_conf:
+                continue
+            if task_type == 'hazard':
+                self.hazard_pub.publish(String(data=label))
+            where = None
+            if box is not None:
+                px = [box[0] * w, box[1] * h, box[2] * w, box[3] * h]
+                on = 'floor' if task_type == 'object' else 'wall'
+                where = self.locator.place(px, w, h, snap, on=on,
+                                           pull_m=0.1 if on == 'floor' else 0.25)
+            if where is None:
+                # never guess a position: an unplaced item cannot score its pos points
+                self.get_logger().warn(f'{task_type} {label}: seen but cannot place it '
+                                       f'(box={box}); not reported.')
+                continue
+            self.publish(task_type, label, scene, where, conf, photo)
+
+    def publish(self, task_type, label, scene, where, conf, photo):
+        """One sighting for reporter.py. map_xy = the point used for the cell (pulled
+        towards the camera); weight = confidence x distance weight."""
+        weight = round(conf * range_weight(where['range_m']), 3)
         item = {'task_type': task_type, 'label': label, 'scene_type': scene,
-                'map_xy': [round(xy[0], 2), round(xy[1], 2)], 'located_by': how, 'message': ''}
-        self.get_logger().warn(f'FOUND {item}')
+                'map_xy': where['cell_xy'], 'raw_xy': where['xy'], 'cam_xy': where['cam_xy'],
+                'range_m': where['range_m'], 'located_by': where['how'],
+                'confidence': round(conf, 2), 'weight': weight, 'photo': photo, 'message': ''}
+        if task_type != 'scene':
+            self.get_logger().warn(f'FOUND {item}')
         self.found_pub.publish(String(data=json.dumps(item)))
 
 

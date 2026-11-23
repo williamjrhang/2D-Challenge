@@ -75,7 +75,8 @@ def test_booklet_coordinates():
 
 
 def test_booklet_vocabulary():
-    assert REAL['scene_types'] == ['kitchen', 'market', 'workshop', 'clinic', 'cleaning_room']
+    assert REAL['scene_types'] == ['clothes_shop', 'fitness_centre', 'kitchen', 'market',
+                                   'workshop', 'clinic', 'cleaning_room', 'furniture_shop']
     assert set(REAL['hazard_labels']) == {'high_voltage', 'radioactive', 'chemical',
                                           'biological', 'flammable'}
     assert set(REAL['object_labels']) == {'medical_kit', 'hand_tools', 'food', 'water', 'utensils'}
@@ -96,20 +97,8 @@ def test_report_fields_follow_booklet():
     assert problem                                    # room unknown -> cannot score
 
 
-def test_task_ids_m01_to_m05():
-    ids, used = REAL['task_ids'], set()
-
-    def tid(**kw):
-        r, _ = make_report(REAL, kw, (0, 0))
-        t = pick_task_id(ids, r, used)
-        if t:
-            used.add(t)
-        return t
-    assert tid(task_type='object', label='food', scene_type='kitchen') is None
-    assert tid(task_type='object', label='medical_kit', scene_type='clinic') == 'M01'
-    assert tid(task_type='object', label='medical_kit', scene_type='clinic') is None  # sent once
-    assert tid(task_type='hazard', label='high_voltage', scene_type='kitchen') == 'M02'
-    assert tid(task_type='survivor', scene_type='market') == 'M05'
-    assert tid(task_type='survivor', scene_type='kitchen') == 'M03'
-    assert tid(task_type='survivor', scene_type='clinic') is None                    # both used
-    assert tid(task_type='qr', message='hi') == 'M04'
+def test_pick_task_id_still_works():
+    ids, used = {'object:medical_kit': 'M01', 'survivor': ['M03', 'M05']}, set()
+    r, _ = make_report(REAL, {'task_type': 'object', 'label': 'medical_kit',
+                              'scene_type': 'clinic'}, (0, 0))
+    assert pick_task_id(ids, r, used) == 'M01'

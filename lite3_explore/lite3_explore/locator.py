@@ -10,7 +10,8 @@ colour image; the points that land inside the box give the object's position.
 import math
 
 import numpy as np
-from rclpy.qos import qos_profile_sensor_data
+from nav_msgs.msg import OccupancyGrid
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -29,8 +30,11 @@ def quat_to_matrix(q):
 class Locator:
 
     def __init__(self, node, tf_buffer, global_frame='map', robot_frame='base_link',
-                 info_topic='/camera/color/camera_info', cloud_topic='/camera/depth/points'):
+                 info_topic='/camera/color/camera_info', cloud_topic='/camera/depth/points',
+                 map_topic=None, floor_z=-0.356):
         self.tf = tf_buffer
+        self.grid = None              # OccupancyGrid, only if map_topic is given (ray fallback)
+        self.floor_z = floor_z        # floor height in the map frame (map origin = base_link at start)
         self.global_frame = global_frame
         self.robot_frame = robot_frame
         self.K = None
@@ -38,6 +42,16 @@ class Locator:
         self.cloud = None
         node.create_subscription(CameraInfo, info_topic, self.on_info, 10)
         node.create_subscription(PointCloud2, cloud_topic, self.on_cloud, qos_profile_sensor_data)
+        if map_topic:
+            qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+            node.create_subscription(OccupancyGrid, map_topic, self.on_map, qos)
+
+    def on_map(self, msg):
+        info = msg.info
+        self.grid = {'res': info.resolution, 'ox': info.origin.position.x,
+                     'oy': info.origin.position.y, 'w': info.width, 'h': info.height,
+                     'data': np.array(msg.data, dtype=np.int8).reshape(info.height, info.width)}
 
     def on_info(self, msg):
         self.K = np.array(msg.k, dtype=float).reshape(3, 3)
@@ -128,3 +142,82 @@ class Locator:
             return None
         x, y, yaw = pose
         return x + distance * math.cos(yaw), y + distance * math.sin(yaw)
+
+    # ============ placing things for the scene reports (vlm_watcher / qr_reader) ============
+
+    def camera_snapshot(self):
+        """Like snapshot() but works without a depth cloud (only the camera pose), so the
+        ray fallbacks below still work. snapshot() itself is unchanged (obstacle_detector)."""
+        if self.K is None:
+            return None
+        try:
+            R_mc, t_mc = self.transform(self.global_frame, self.color_frame)
+        except TransformException:
+            return None
+        return {'cloud': None, 'R_mc': R_mc, 't_mc': t_mc, 'pose': self.robot_pose()}
+
+    def pixel_ray(self, u, v, image_w, image_h, snap):
+        """Camera origin and unit direction (map frame) through pixel (u, v)."""
+        u = u * (self.K[0, 2] * 2) / image_w
+        v = v * (self.K[1, 2] * 2) / image_h
+        d = np.array([(u - self.K[0, 2]) / self.K[0, 0], (v - self.K[1, 2]) / self.K[1, 1], 1.0])
+        d = snap['R_mc'] @ d
+        return snap['t_mc'], d / np.linalg.norm(d)
+
+    def floor_hit(self, origin, d, max_range=4.0):
+        """Where the ray meets the floor plane, or None."""
+        if d[2] > -0.05:
+            return None
+        t = (self.floor_z - origin[2]) / d[2]
+        if t <= 0 or t > max_range:
+            return None
+        p = origin + t * d
+        return float(p[0]), float(p[1])
+
+    def wall_hit(self, origin, d, max_range=4.0, step=0.04):
+        """First occupied map cell along the ray's horizontal direction, or None."""
+        g = self.grid
+        h = np.array([d[0], d[1]])
+        if g is None or np.linalg.norm(h) < 1e-3:
+            return None
+        h = h / np.linalg.norm(h)
+        for r in np.arange(0.2, max_range, step):
+            x, y = origin[0] + r * h[0], origin[1] + r * h[1]
+            i, j = int((y - g['oy']) / g['res']), int((x - g['ox']) / g['res'])
+            if not (0 <= i < g['h'] and 0 <= j < g['w']):
+                return None
+            if g['data'][i, j] >= 65:
+                return float(x), float(y)
+        return None
+
+    def place(self, box, image_w, image_h, snap, on='wall', pull_m=0.25):
+        """Map position of a box for the scene reports.
+        Order: depth inside the box -> ray to the floor (on='floor') or to the first wall
+        on the SLAM map (on='wall') -> None (never a guessed 'ahead' point).
+        Returns {'xy', 'cell_xy', 'cam_xy', 'range_m', 'how'} or None.
+        cell_xy = xy pulled pull_m back towards the camera: a sign or picture on a wall sits
+        exactly on a cell border, the pull puts it in the room on the camera's side."""
+        if snap is None or self.K is None:
+            return None
+        xy, how = None, None
+        if snap.get('cloud') is not None:
+            xy, how = self.locate_box(box, image_w, image_h, snap), 'depth'
+        if xy is None:
+            u = (box[0] + box[2]) / 2
+            v = box[3] if on == 'floor' else (box[1] + box[3]) / 2
+            origin, d = self.pixel_ray(u, v, image_w, image_h, snap)
+            first, second = ((self.floor_hit, self.wall_hit) if on == 'floor'
+                             else (self.wall_hit, self.floor_hit))
+            xy, how = first(origin, d), 'ray_' + first.__name__.split('_')[0]
+            if xy is None:
+                xy, how = second(origin, d), 'ray_' + second.__name__.split('_')[0]
+        if xy is None:
+            return None
+        cam = snap['t_mc']
+        dx, dy = xy[0] - cam[0], xy[1] - cam[1]
+        rng = math.hypot(dx, dy)
+        k = max(0.0, rng - pull_m) / rng if rng > 1e-6 else 1.0
+        return {'xy': [round(xy[0], 3), round(xy[1], 3)],
+                'cell_xy': [round(cam[0] + k * dx, 3), round(cam[1] + k * dy, 3)],
+                'cam_xy': [round(float(cam[0]), 3), round(float(cam[1]), 3)],
+                'range_m': round(rng, 2), 'how': how}
