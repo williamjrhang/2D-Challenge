@@ -8,6 +8,7 @@ colour image; the points that land inside the box give the object's position.
 """
 
 import math
+import time
 
 import numpy as np
 from nav_msgs.msg import OccupancyGrid
@@ -31,7 +32,7 @@ class Locator:
 
     def __init__(self, node, tf_buffer, global_frame='map', robot_frame='base_link',
                  info_topic='/camera/color/camera_info', cloud_topic='/camera/depth/points',
-                 map_topic=None, floor_z=-0.356):
+                 map_topic=None, floor_z=-0.356, cloud_on_demand=False):
         self.tf = tf_buffer
         self.grid = None              # OccupancyGrid, only if map_topic is given (ray fallback)
         self.floor_z = floor_z        # floor height in the map frame (map origin = base_link at start)
@@ -41,7 +42,16 @@ class Locator:
         self.color_frame = None
         self.cloud = None
         node.create_subscription(CameraInfo, info_topic, self.on_info, 10)
-        node.create_subscription(PointCloud2, cloud_topic, self.on_cloud, qos_profile_sensor_data)
+        # cloud_on_demand: no permanent depth subscription (the 640x480 cloud at 30 Hz crosses
+        # the robot link once PER SUBSCRIBER and choked it on 24/11). wait_cloud() /
+        # request_cloud() subscribe until ONE cloud arrives, then unsubscribe.
+        self.node = node
+        self.cloud_topic = cloud_topic
+        self.on_demand = cloud_on_demand
+        self._req = None
+        if not cloud_on_demand:
+            node.create_subscription(PointCloud2, cloud_topic, self.on_cloud,
+                                     qos_profile_sensor_data)
         if map_topic:
             qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -221,3 +231,64 @@ class Locator:
                 'cell_xy': [round(cam[0] + k * dx, 3), round(cam[1] + k * dy, 3)],
                 'cam_xy': [round(float(cam[0]), 3), round(float(cam[1]), 3)],
                 'range_m': round(rng, 2), 'how': how}
+
+    # ============ on-demand depth (cloud_on_demand=True) ============
+
+    def attach_cloud(self, snap, cloud):
+        """Add a cloud to a camera_snapshot() so locate_box() can use depth."""
+        if snap is None or cloud is None:
+            return snap
+        try:
+            R_cd, t_cd = self.transform(self.color_frame, cloud.header.frame_id)
+        except TransformException:
+            return snap
+        snap.update(cloud=cloud, R_cd=R_cd, t_cd=t_cd)
+        snap.pop('xyz', None)
+        return snap
+
+    def request_cloud(self, callback, timeout_s=1.5):
+        """Subscribe until one cloud arrives (or timeout), then unsubscribe and call
+        callback(cloud or None). One request at a time; returns False if one is running.
+        Safe to call from a ROS callback (does not block)."""
+        if self._req is not None:
+            return False
+        state = {'done': False}
+
+        def finish(cloud):
+            if state['done']:
+                return
+            state['done'] = True
+            req, self._req = self._req, None
+            if req is not None:
+                try:
+                    self.node.destroy_subscription(req['sub'])
+                except Exception:  # noqa: BLE001
+                    pass
+                req['timer'].cancel()
+                try:
+                    self.node.destroy_timer(req['timer'])
+                except Exception:  # noqa: BLE001
+                    pass
+            callback(cloud)
+
+        sub = self.node.create_subscription(PointCloud2, self.cloud_topic,
+                                            lambda m: finish(m), qos_profile_sensor_data)
+        timer = self.node.create_timer(timeout_s, lambda: finish(None))
+        self._req = {'sub': sub, 'timer': timer}
+        return True
+
+    def wait_cloud(self, timeout_s=1.5):
+        """Blocking version for worker threads (NOT for ROS callbacks)."""
+        import threading
+        ev, box = threading.Event(), {}
+
+        def cb(cloud):
+            box['cloud'] = cloud
+            ev.set()
+        t0 = time.monotonic()
+        while not self.request_cloud(cb, timeout_s):     # another request is running
+            if time.monotonic() - t0 > timeout_s:
+                return None
+            time.sleep(0.05)
+        ev.wait(timeout_s + 1.0)
+        return box.get('cloud')

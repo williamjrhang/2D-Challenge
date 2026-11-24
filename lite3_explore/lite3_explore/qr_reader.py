@@ -111,7 +111,7 @@ class QrReader(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.locator = Locator(self, self.tf_buffer, map_topic='/map')
+        self.locator = Locator(self, self.tf_buffer, map_topic='/map', cloud_on_demand=True)
         self.decoder = QrDecoder()
 
         self.create_subscription(CompressedImage, g('image_topic'), self.on_image,
@@ -152,6 +152,17 @@ class QrReader(Node):
 
         h, w = img.shape[:2]
         box = [pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max()]
+        if self.locator.on_demand and snap is not None and snap.get('cloud') is None:
+            # depth only now (one cloud), placed when it arrives; never blocks this callback
+            self.locator.request_cloud(
+                lambda c: self.place_and_send(text, box, w, h, self.locator.attach_cloud(snap, c)),
+                timeout_s=1.5)
+            return
+        self.place_and_send(text, box, w, h, snap)
+
+    def place_and_send(self, text, box, w, h, snap):
+        if text in self.seen:
+            return
         where = self.locator.place(box, w, h, snap, on='wall', pull_m=0.25)
         self.attempts[text] = self.attempts.get(text, 0) + 1
         if where is None and self.attempts[text] < self.place_attempts:

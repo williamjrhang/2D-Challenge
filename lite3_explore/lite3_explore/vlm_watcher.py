@@ -216,7 +216,9 @@ class VlmWatcher(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.locator = Locator(self, self.tf_buffer, map_topic='/map')
+        # depth only when a photo is taken (a permanent 30 Hz cloud subscription per node
+        # choked the robot link on 24/11)
+        self.locator = Locator(self, self.tf_buffer, map_topic='/map', cloud_on_demand=True)
 
         self.create_subscription(CompressedImage, g('image_topic'), self.on_image,
                                  qos_profile_sensor_data)
@@ -317,7 +319,14 @@ class VlmWatcher(Node):
     def look(self, msg, snap, pose):
         try:
             jpeg, w, h = self.prepare(msg)
-            answer = self.ask(jpeg)
+            got, box = threading.Event(), {}
+            fetching = (snap is not None and snap.get('cloud') is None and self.locator.on_demand
+                        and self.locator.request_cloud(
+                            lambda c: (box.update(cloud=c), got.set()), timeout_s=1.5))
+            answer = self.ask(jpeg)                      # depth arrives meanwhile
+            if fetching:
+                got.wait(2.5)
+                self.locator.attach_cloud(snap, box.get('cloud'))
             self.save_photo(jpeg, answer)
             if answer is not None:
                 self.use(answer, w, h, snap, pose)
