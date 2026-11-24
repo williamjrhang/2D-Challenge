@@ -31,6 +31,7 @@ class CellInfo:
     state: str                     # free | occupied | unknown | partial
     free_frac: float
     walls: list = field(default_factory=list)
+    goal: tuple = None             # map (x, y): free point in the cell's middle, clear of walls
 
 
 @dataclass
@@ -45,7 +46,8 @@ class Room:
 class CellGrid:
 
     def __init__(self, arena, half_m=0.30, wall_band_m=0.15, wall_min_frac=0.5,
-                 min_free_frac=0.55, max_occupied_frac=0.25, range_cells=6, step_m=0.05):
+                 min_free_frac=0.55, max_occupied_frac=0.25, range_cells=6, step_m=0.05,
+                 bounds_cells=None, clearance_m=0.30):
         self.arena = arena
         self.size = arena.cell
         self.half = half_m
@@ -55,9 +57,13 @@ class CellGrid:
         self.max_occ = max_occupied_frac
         self.range = int(range_cells)
         self.step = step_m
+        # [i_min, j_min, i_max, j_max] arena cells taking part (None = range_cells box)
+        self.bounds_cells = [int(v) for v in bounds_cells] if bounds_cells else None
+        self.clearance = clearance_m
         g = np.arange(-math.floor(half_m / step_m), math.floor(half_m / step_m) + 1) * step_m
         u, v = np.meshgrid(g, g)
-        self._visit_uv = np.stack([u.ravel(), v.ravel()], 1)
+        uv = np.stack([u.ravel(), v.ravel()], 1)
+        self._visit_uv = uv[np.argsort((uv ** 2).sum(1), kind='stable')]   # centre first
         along = np.arange(-0.35, 0.35 + 1e-9, step_m)
         across = np.arange(self.size / 2 - wall_band_m, self.size / 2 + wall_band_m + 1e-9, step_m)
         self._side_uv = {}
@@ -108,19 +114,36 @@ class CellGrid:
         out[inside] = cat
         return out
 
+    def in_bounds(self, cell):
+        b = self.bounds_cells
+        return b is None or (b[0] <= cell[0] <= b[2] and b[1] <= cell[1] <= b[3])
+
+    def map_box(self, margin_m=0.3):
+        """Map-frame [xmin, ymin, xmax, ymax] around the bounds cells (None if no bounds)."""
+        b = self.bounds_cells
+        if b is None:
+            return None
+        pts = [self.centre((i, j)) for i in (b[0], b[2]) for j in (b[1], b[3])]
+        r = (self.size / 2.0 + margin_m) * math.sqrt(2.0)
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return [min(xs) - r, min(ys) - r, max(xs) + r, max(ys) + r]
+
     def candidate_cells(self, info):
-        """Cells within range_cells of the start whose centre lies on the map."""
+        """Cells (inside bounds_cells, else within range_cells) whose centre is on the map."""
         x0, y0 = info.origin_x, info.origin_y
         x1, y1 = x0 + info.width * info.resolution, y0 + info.height * info.resolution
+        b = self.bounds_cells or [-self.range, -self.range, self.range, self.range]
         out = []
-        for i in range(-self.range, self.range + 1):
-            for j in range(-self.range, self.range + 1):
+        for i in range(b[0], b[2] + 1):
+            for j in range(b[1], b[3] + 1):
                 cx, cy = self.centre((i, j))
                 if x0 <= cx <= x1 and y0 <= cy <= y1:
                     out.append((i, j))
         return out
 
     def analyze(self, grid, info, free_max=25, occupied_min=65):
+        from lite3_explore.coverage import dilate
+        occ_near = dilate(grid >= occupied_min, int(math.ceil(self.clearance / info.resolution)))
         out = {}
         for cell in self.candidate_cells(info):
             xs, ys = self._to_map(cell, self._visit_uv)
@@ -137,14 +160,23 @@ class CellGrid:
                 state = 'unknown'
             else:
                 state = 'partial'
-            walls = []
+            walls, goal = [], None
             if state == 'free':
+                col = np.floor((xs - info.origin_x) / info.resolution).astype(int)
+                row = np.floor((ys - info.origin_y) / info.resolution).astype(int)
+                ok = (k == 0)
+                inside = (row >= 0) & (row < info.height) & (col >= 0) & (col < info.width)
+                ok &= inside
+                ok[inside] &= ~occ_near[row[inside], col[inside]]
+                idx = np.flatnonzero(ok)            # samples are sorted centre first
+                if len(idx):
+                    goal = (float(xs[idx[0]]), float(ys[idx[0]]))
                 for side, uv in self._side_uv.items():
                     sx, sy = self._to_map(cell, uv)
                     ks = self._cats(grid, info, sx, sy, free_max, occupied_min)
                     if (ks == 1).any(axis=1).mean() >= self.wall_min:
                         walls.append(side)
-            out[cell] = CellInfo(cell, self.centre(cell), state, round(free, 3), walls)
+            out[cell] = CellInfo(cell, self.centre(cell), state, round(free, 3), walls, goal)
         return out
 
     # ---------- rooms ----------

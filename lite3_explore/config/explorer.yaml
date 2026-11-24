@@ -95,6 +95,18 @@ frontier_explorer:
     room_max_attempts: 2
     cell_overlay: true
 
+    # ---- GRID explore ----
+    # Visit arena cells one by one (nearest free unvisited cell first) instead of chasing
+    # frontiers; frontiers only to uncover cells that are still unknown. Everything (cells,
+    # frontiers, coverage) stays inside grid_bounds_cells: arena cells relative to the start
+    # cell, [i_min, j_min, i_max, j_max], +i = start forward, +j = start left.
+    # Default: 5 rows + final cell forward (0..5), 2 cells each side (mirrored arenas: the
+    # 2 columns outside the real arena are behind its outer wall and simply never reachable).
+    # Launch switch: grid_explore:=true.
+    grid_explore: false
+    grid_bounds_cells: [0, -2, 5, 2]
+    grid_max_attempts: 2
+
     # ---- HOLD: stand still so obstacle_detector can confirm (gait change) ----
     # The detector needs confirm_frames frames in a row (obstacle.yaml: 3 at rate_hz 2 =
     # 1.5 s, more if YOLO runs slower) before it sends stairs/rubble/curtain/potholes_ahead.

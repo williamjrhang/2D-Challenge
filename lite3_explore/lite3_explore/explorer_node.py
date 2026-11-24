@@ -148,6 +148,13 @@ class FrontierExplorer(Node):
         p('room_dwell_s', 2.5)            # still time per view (QR reader 3 Hz, VLM 1 photo)
         p('room_max_attempts', 2)
         p('cell_overlay', True)           # RViz /exploration/cells: cells, walls, rooms
+        # [GRID] visit arena cells one by one (nearest free unvisited cell centre first) instead
+        # of chasing frontiers; frontiers only uncover cells that are still unknown. Frontiers,
+        # coverage and cells are limited to grid_bounds_cells (arena cells relative to the start
+        # cell: [i_min, j_min, i_max, j_max], +i forward, +j left).
+        p('grid_explore', False)
+        p('grid_bounds_cells', [0, -2, 5, 2])
+        p('grid_max_attempts', 2)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -170,7 +177,7 @@ class FrontierExplorer(Node):
         # [ROOM]
         self.P.update({name: g(name) for name in [
             'room_check', 'room_check_radius_m', 'room_dwell_s', 'room_max_attempts',
-            'cell_overlay',
+            'cell_overlay', 'grid_explore', 'grid_bounds_cells', 'grid_max_attempts',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -178,7 +185,10 @@ class FrontierExplorer(Node):
             self.get_logger().warn(f'mission_file not readable ({e}); booklet grid 1.02 m')
             arena = Arena({'arena': {'cell_size_m': 1.02, 'start_cell_centre': [0.0, 0.0],
                                      'start_heading_deg': 0.0, 'final_cell_centre': None}})
-        self.cells = CellGrid(arena)
+        self.cells = CellGrid(
+            arena, clearance_m=g('goal_clearance_m'),
+            bounds_cells=list(g('grid_bounds_cells')) if g('grid_explore') else None)
+        self.cell_attempts = {}           # [GRID] cell -> goals sent
         self.cell_info = {}               # cell -> CellInfo (last analysis)
         self.cells_seq = -1               # map_seq of that analysis
         self.visited_cells = set()
@@ -193,6 +203,11 @@ class FrontierExplorer(Node):
         if self.bounds is None and guard > 0:
             self.bounds = [-guard, -guard, guard, guard]  # large-map guard around the start pose
             self.get_logger().info(f'bounds off: large-map guard +/- {guard:.1f} m around the start')
+        if self.P['grid_explore']:          # [GRID] arena box instead of the large-map guard
+            self.bounds = self.cells.map_box()
+            self.get_logger().info(
+                f'GRID explore: cells {self.P["grid_bounds_cells"]} -> map box '
+                f'{[round(v, 2) for v in self.bounds]}')
         self.last_spin_xy = None
 
         # [COVER] pose history (map frame), seen mask, save file
@@ -703,6 +718,9 @@ class FrontierExplorer(Node):
         # [ROOM] a nearby unchecked room first (QR codes are on room side walls)
         if self.start_room(pose, self.P['room_check_radius_m']):
             return
+        # [GRID] next unvisited free cell; frontiers only when none is left
+        if self.start_cell(pose):
+            return
         frontiers = find_frontiers(
             self.grid, self.info,
             min_size_cells=self.P['min_frontier_size_cells'],
@@ -782,6 +800,17 @@ class FrontierExplorer(Node):
                         f'Nav2 said goal reached but robot is {miss:.1f} m away '
                         '(check TF / transform_tolerance).')
                     result = TaskResult.FAILED
+            if result == TaskResult.SUCCEEDED and self.goal_kind == 'cell':  # [GRID]
+                if self.start_arrival_hold():          # let obstacle_detector look ahead
+                    return
+                cell = self.cells.cell_of(*self.goal_xy)
+                self.visited_cells.add(cell)
+                self.failures_in_a_row = 0
+                self.last_good_xy = self.goal_xy
+                self.get_logger().info(f'GRID: cell {cell} visited '
+                                       f'({len(self.visited_cells)} visited)')
+                self.set_state('SELECT')
+                return
             if result == TaskResult.SUCCEEDED and self.goal_kind == 'room':  # [ROOM]
                 self.failures_in_a_row = 0
                 self.last_good_xy = self.goal_xy
@@ -919,7 +948,7 @@ class FrontierExplorer(Node):
         """Reached a frontier / coverage goal: dwell once, facing the travel direction
         (the Nav2 goal yaw points from the start towards the goal)."""
         if (self.goal_dwell_done or self.P['goal_dwell_s'] <= 0 or self.P['dry_run']
-                or self.goal_kind not in ('frontier', 'coverage')):
+                or self.goal_kind not in ('frontier', 'coverage', 'cell')):  # [GRID] cell
             return False
         self.goal_dwell_done = True
         self.start_hold(self.P['goal_dwell_s'], ('navigate',), 'at goal')
@@ -1057,6 +1086,29 @@ class FrontierExplorer(Node):
             if radius is None or d <= radius:
                 out.append((d, room))
         return [r for _, r in sorted(out, key=lambda t: t[0])]
+
+    def start_cell(self, pose):
+        """[GRID] Drive to the nearest free, unvisited cell inside the bounds."""
+        if not self.P['grid_explore'] or self.P['dry_run'] or pose is None or not self.cell_info:
+            return False
+        here = self.cells.cell_of(pose[0], pose[1])
+        todo = []
+        for cell, ci in self.cell_info.items():
+            if (ci.state != 'free' or ci.goal is None or cell in self.visited_cells
+                    or cell == here and self.cells.in_visit_region(cell, pose[0], pose[1])
+                    or not self.cells.in_bounds(cell)
+                    or self.cell_attempts.get(cell, 0) >= self.P['grid_max_attempts']):
+                continue
+            todo.append((math.hypot(ci.goal[0] - pose[0], ci.goal[1] - pose[1]), cell, ci))
+        for _, cell, ci in sorted(todo):
+            self.cell_attempts[cell] = self.cell_attempts.get(cell, 0) + 1
+            self.get_logger().info(
+                f'GRID: going to cell {cell} ({len(todo)} unvisited free cells, attempt '
+                f'{self.cell_attempts[cell]}/{self.P["grid_max_attempts"]})')
+            if self.send_goal(ci.goal, pose[:2], is_frontier=False, kind='cell'):
+                self.set_state('NAVIGATE')
+                return True
+        return False
 
     def start_room(self, pose, radius):
         """Go to the nearest unchecked room's doorway. True if a goal was sent."""

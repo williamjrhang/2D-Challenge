@@ -86,3 +86,15 @@ def test_visit_region():
     assert cg.in_visit_region((1, 0), 1.2, 0.1)
     assert not cg.in_visit_region((1, 0), 1.5, 0.0)
     assert cg.cell_of(1.2, -0.9) == (1, -1)
+
+
+def test_bounds_and_safe_goal():
+    g, info = room_map()
+    cg = CellGrid(arena(), bounds_cells=[0, -2, 5, 2])
+    cells = cg.analyze(g, info)
+    assert all(cg.in_bounds(c) for c in cells)
+    assert (6, 0) not in cells and (0, 3) not in cells
+    gx, gy = cells[(1, 0)].goal
+    assert math.isclose(gx, 1.02, abs_tol=0.06) and abs(gy) < 0.06     # centre is clear
+    box = cg.map_box()
+    assert box[0] < -0.5 and box[2] > 5.6 and box[1] < -2.5 and box[3] > 2.5
