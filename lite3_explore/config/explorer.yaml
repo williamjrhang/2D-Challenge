@@ -82,6 +82,19 @@ frontier_explorer:
                                      # ONLY if SLAM keeps the same map frame (same saved map /
                                      # same start pose), otherwise the old poses are in the wrong place.
 
+    # ---- ROOM check (cells.py) ----
+    # Booklet E6: QR codes are only on the LEFT/RIGHT walls of rooms, 10-15 cm (readable up to
+    # ~1.2 m). A room = a free 1.02 m cell with three walls on the LIVE map (no pre-mapping).
+    # room_check: go to its doorway, face into the room, then each side wall, room_dwell_s
+    # each (QR reader + wall pins read the code, VLM gets one photo per view). Nearby rooms
+    # (room_check_radius_m) before frontiers; every remaining room before camera coverage.
+    # Launch switch: room_check:=true. /exploration/cells (RViz) shows cells, walls, rooms.
+    room_check: false
+    room_check_radius_m: 3.0
+    room_dwell_s: 2.5
+    room_max_attempts: 2
+    cell_overlay: true
+
     # ---- HOLD: stand still so obstacle_detector can confirm (gait change) ----
     # The detector needs confirm_frames frames in a row (obstacle.yaml: 3 at rate_hz 2 =
     # 1.5 s, more if YOLO runs slower) before it sends stairs/rubble/curtain/potholes_ahead.

@@ -31,7 +31,7 @@ import os  # [COVER]
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PointStamped, PoseStamped, Twist
+from geometry_msgs.msg import Point, PointStamped, PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from nav_msgs.msg import Path  # [COVER]
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
@@ -39,7 +39,7 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, ColorRGBA, String
 from std_msgs.msg import Float32  # [COVER]
 from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
@@ -58,6 +58,10 @@ from lite3_explore.coverage import (
     PoseHistory, SeenTracker, bounds_mask, coverage_fraction, default_coverage_path,
     find_coverage_goals, load, newest_coverage_file, save, visited_mask,
 )
+
+# [ROOM] arena cells, walls and rooms from the live map (cells.py)
+from lite3_explore.cells import CellGrid, SIDES, wrap
+from lite3_explore.mission_config import Arena, load_mission
 
 # [HOLD] detections that may be the reason Nav2 is stuck (gait-change obstacles)
 HOLD_KINDS = ('stairs', 'rubble', 'curtain', 'potholes')
@@ -135,6 +139,15 @@ class FrontierExplorer(Node):
         p('obstacle_hold_s', 0.0)         # instead of blacklisting when an obstacle is ahead
         p('obstacle_hold_m', 1.5)         # detection this close ahead counts
         p('obstacle_recent_s', 2.0)       # ... if it arrived this recently
+        # [ROOM] booklet: QR codes are only on the left/right walls of rooms. A room = a free
+        # cell with three walls on the live map. room_check: stand in its doorway and face
+        # into the room, then each side wall, so QR / wall pins / the VLM see them up close.
+        p('mission_file', '')             # arena grid (cell size, start cell) for cells/rooms
+        p('room_check', False)
+        p('room_check_radius_m', 3.0)     # during frontier exploration: only rooms this close
+        p('room_dwell_s', 2.5)            # still time per view (QR reader 3 Hz, VLM 1 photo)
+        p('room_max_attempts', 2)
+        p('cell_overlay', True)           # RViz /exploration/cells: cells, walls, rooms
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -154,6 +167,26 @@ class FrontierExplorer(Node):
             'coverage_file', 'resume_coverage',
             'goal_dwell_s', 'obstacle_hold_s', 'obstacle_hold_m', 'obstacle_recent_s',
         ]})
+        # [ROOM]
+        self.P.update({name: g(name) for name in [
+            'room_check', 'room_check_radius_m', 'room_dwell_s', 'room_max_attempts',
+            'cell_overlay',
+        ]})
+        try:
+            arena = Arena(load_mission(g('mission_file')))
+        except Exception as e:  # noqa: BLE001  (fall back to the booklet grid)
+            self.get_logger().warn(f'mission_file not readable ({e}); booklet grid 1.02 m')
+            arena = Arena({'arena': {'cell_size_m': 1.02, 'start_cell_centre': [0.0, 0.0],
+                                     'start_heading_deg': 0.0, 'final_cell_centre': None}})
+        self.cells = CellGrid(arena)
+        self.cell_info = {}               # cell -> CellInfo (last analysis)
+        self.cells_seq = -1               # map_seq of that analysis
+        self.visited_cells = set()
+        self.room_status = {}             # cell -> {'attempts', 'done', 'views_done'}
+        self.room = None                  # Room being checked
+        self.room_idx = 0
+        self.room_phase = None
+        self.room_until = None
         b = [float(v) for v in (self.P['bounds'] or [])]
         self.bounds = b if len(b) == 4 else None     # [0.0] / [] in yaml = off
         guard = float(self.P['guard_radius_m'])
@@ -194,6 +227,10 @@ class FrontierExplorer(Node):
         self.status_pub = self.create_publisher(String, '/exploration/status', 10)
         self.done_pub = self.create_publisher(Bool, '/exploration/done', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/exploration/frontiers', 10)
+        # [ROOM] RViz overlay + VLM trigger
+        self.cells_pub = self.create_publisher(MarkerArray, '/exploration/cells', 10)
+        self.look_pub = self.create_publisher(Bool, '/perception/look', 10)
+        self.last_cells_pub = 0.0
         # [COVER] RViz: camera coverage grid (latched), pose trail, coverage %
         if self.P['coverage_enabled']:
             self.coverage_pub = self.create_publisher(OccupancyGrid, '/exploration/coverage', map_qos)
@@ -340,8 +377,9 @@ class FrontierExplorer(Node):
             self.get_logger().warn(
                 f'Blacklisted ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f}): {why}')
 
-    def send_goal(self, xy, robot_xy, is_frontier=True, kind=None):  # [COVER] kind
-        yaw = math.atan2(xy[1] - robot_xy[1], xy[0] - robot_xy[0])
+    def send_goal(self, xy, robot_xy, is_frontier=True, kind=None, yaw=None):  # [COVER] kind
+        if yaw is None:  # [ROOM] room goals face into the room
+            yaw = math.atan2(xy[1] - robot_xy[1], xy[0] - robot_xy[0])
         goal = PoseStamped()
         goal.header.frame_id = self.P['global_frame']
         goal.header.stamp = self.nav.get_clock().now().to_msg()
@@ -577,11 +615,12 @@ class FrontierExplorer(Node):
         if self.P['coverage_enabled']:
             self.update_coverage(pose)
 
+        self.update_cells(pose)  # [ROOM]
         if not self.enabled:
-            if self.state in ('NAVIGATE', 'SPIN') and not self.P['dry_run']:
+            if self.state in ('NAVIGATE', 'SPIN', 'ROOM_LOOK') and not self.P['dry_run']:
                 self.get_logger().info(f'Cancelling Nav2 {self.state.lower()} for exploration pause.')
                 self.nav.cancelTask()
-            if self.state in ('SPIN', 'RECOVER', 'HOLD'):  # [HOLD] stop on pause too
+            if self.state in ('SPIN', 'RECOVER', 'HOLD', 'ROOM_LOOK'):  # [HOLD] stop on pause too
                 self.publish_cmd()
             if self.state != 'DONE':
                 self.set_state('PAUSED')
@@ -661,6 +700,9 @@ class FrontierExplorer(Node):
         if self.grid is None or pose is None:
             self.log_missing_inputs(pose)
             return
+        # [ROOM] a nearby unchecked room first (QR codes are on room side walls)
+        if self.start_room(pose, self.P['room_check_radius_m']):
+            return
         frontiers = find_frontiers(
             self.grid, self.info,
             min_size_cells=self.P['min_frontier_size_cells'],
@@ -696,6 +738,9 @@ class FrontierExplorer(Node):
             if self.P['dry_run']:
                 return  # keep watching the map while you drive by hand
             if self.empty_checks >= self.P['done_after_empty_checks']:
+                # [ROOM] no frontiers left: every remaining room, however far
+                if self.start_room(pose, None):
+                    return
                 # [COVER] mapped is not seen: look where the camera has not been first
                 if self.P['coverage_enabled']:
                     self.get_logger().info('No reachable frontiers left: checking camera coverage (COVER).')
@@ -737,6 +782,11 @@ class FrontierExplorer(Node):
                         f'Nav2 said goal reached but robot is {miss:.1f} m away '
                         '(check TF / transform_tolerance).')
                     result = TaskResult.FAILED
+            if result == TaskResult.SUCCEEDED and self.goal_kind == 'room':  # [ROOM]
+                self.failures_in_a_row = 0
+                self.last_good_xy = self.goal_xy
+                self.start_room_look(pose)
+                return
             if result == TaskResult.SUCCEEDED:
                 # [HOLD] arrival dwell first; this branch runs again (unchanged) after it
                 if self.start_arrival_hold():
@@ -822,6 +872,9 @@ class FrontierExplorer(Node):
                 self.set_state('SELECT')
 
     def start_recovery(self, why):
+        if self.goal_kind == 'room' and self.room is not None:  # [ROOM]
+            self.get_logger().warn(f'Room {self.room.cell}: could not reach the doorway ({why})')
+            self.room = None
         # [HOLD] obstacle ahead: hold instead of blacklisting (once per goal)
         if self.start_obstacle_hold(why):
             return
@@ -937,6 +990,9 @@ class FrontierExplorer(Node):
             self.cover_empty_checks = 0
             self.set_state('SELECT')
             return
+        # [ROOM] remaining rooms before more coverage
+        if self.start_room(pose, None):
+            return
         # 2. Seen enough?
         seen, frac = self.coverage_now()
         target = self.P['coverage_target']
@@ -965,9 +1021,174 @@ class FrontierExplorer(Node):
             self.goal_cells_xy = [self.info.cell_to_world(r, c) for r, c in best.cells]
             self.set_state('NAVIGATE')
 
+    # ================= [ROOM] cells, walls, room check =================
+
+    def update_cells(self, pose):
+        """Analyse cells when the map changed (<= 1 Hz), mark visited cells, publish overlay."""
+        now = self.now_s()
+        if pose is not None:
+            c = self.cells.cell_of(pose[0], pose[1])
+            if c not in self.visited_cells and self.cells.in_visit_region(c, pose[0], pose[1]):
+                self.visited_cells.add(c)
+        if self.grid is None or now - self.last_cells_pub < 1.0:
+            return
+        if self.map_seq != self.cells_seq:
+            self.cell_info = self.cells.analyze(self.grid, self.info, self.P['free_max'],
+                                                self.P['occupied_min'])
+            self.cells_seq = self.map_seq
+        self.last_cells_pub = now
+        if self.P['cell_overlay']:
+            self.publish_cells()
+
+    def room_candidates(self, pose, radius):
+        out = []
+        for room in self.cells.rooms(self.cell_info):
+            if room.cell == (0, 0):
+                continue                  # start cell: the initial look-around spin covers it
+            st = self.room_status.get(room.cell, {'attempts': 0, 'done': False})
+            if st['done'] or st['attempts'] >= self.P['room_max_attempts']:
+                continue
+            x, y = room.standpoint
+            if self.bounds is not None:
+                xmin, ymin, xmax, ymax = self.bounds
+                if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                    continue
+            d = math.hypot(x - pose[0], y - pose[1])
+            if radius is None or d <= radius:
+                out.append((d, room))
+        return [r for _, r in sorted(out, key=lambda t: t[0])]
+
+    def start_room(self, pose, radius):
+        """Go to the nearest unchecked room's doorway. True if a goal was sent."""
+        if (not self.P['room_check'] or self.P['dry_run'] or pose is None
+                or not self.cell_info):
+            return False
+        for room in self.room_candidates(pose, radius):
+            st = self.room_status.setdefault(room.cell, {'attempts': 0, 'done': False,
+                                                         'views_done': []})
+            st['attempts'] += 1
+            self.get_logger().info(
+                f'ROOM check {room.cell} (doorway {room.open_side}, QR walls {room.side_walls}), '
+                f'attempt {st["attempts"]}/{self.P["room_max_attempts"]}')
+            if self.send_goal(room.standpoint, pose[:2], is_frontier=False, kind='room',
+                              yaw=room.views[0][1]):
+                self.room = room
+                self.set_state('NAVIGATE')
+                return True
+        return False
+
+    def start_room_look(self, pose):
+        self.room_idx = 0
+        self.set_state('ROOM_LOOK')
+        self.start_room_turn(pose)
+
+    def start_room_turn(self, pose):
+        """Turn (Nav2 spin, collision-checked) to the next view, or start the dwell."""
+        name, yaw = self.room.views[self.room_idx]
+        delta = wrap(yaw - pose[2]) if pose is not None else 0.0
+        if abs(delta) > math.radians(8):
+            limit = abs(delta) / max(self.P['spin_speed'], 1e-3) + 8.0
+            if self.nav.spin(spin_dist=delta, time_allowance=int(limit)):
+                self.room_phase = 'turn'
+                self.room_until = self.now_s() + limit + 3.0
+                return
+            self.get_logger().warn(f'ROOM {self.room.cell}: Nav2 refused the turn to {name}')
+        self.start_room_dwell()
+
+    def start_room_dwell(self):
+        name, _ = self.room.views[self.room_idx]
+        self.room_phase = 'dwell'
+        self.room_until = self.now_s() + self.P['room_dwell_s']
+        self.publish_cmd()
+        self.look_pub.publish(Bool(data=True))       # one VLM photo of this view (booklet J1)
+        self.get_logger().info(f'ROOM {self.room.cell}: looking at {name}')
+
+    def do_room_look(self, pose):
+        if self.room is None:
+            self.set_state('SELECT')
+            return
+        now = self.now_s()
+        if self.room_phase == 'turn':
+            if self.nav.isTaskComplete() or now > self.room_until:
+                if not self.nav.isTaskComplete():
+                    self.nav.cancelTask()
+                self.start_room_dwell()
+            return
+        self.publish_cmd()
+        if now < self.room_until:
+            return
+        st = self.room_status[self.room.cell]
+        st['views_done'].append(self.room.views[self.room_idx][0])
+        self.room_idx += 1
+        if self.room_idx < len(self.room.views):
+            self.start_room_turn(pose)
+            return
+        st['done'] = True
+        self.get_logger().info(f'ROOM {self.room.cell} checked ({len(self.room.views)} views).')
+        self.room = None
+        self.set_state('SELECT')
+
+    def publish_cells(self):
+        """Cells (green visited / grey free), walls (yellow; blue once a room check looked at
+        them), room labels (purple, blue when checked). Display only."""
+        arr = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        arr.markers.append(clear)
+        frame = self.P['global_frame']
+        stamp = self.get_clock().now().to_msg()
+
+        def mk(ns, mid, mtype):
+            m = Marker()
+            m.header.frame_id, m.header.stamp = frame, stamp
+            m.ns, m.id, m.type, m.action = ns, mid, mtype, Marker.ADD
+            m.pose.orientation.w = 1.0
+            return m
+        cubes = mk('cells', 0, Marker.CUBE_LIST)
+        cubes.scale.x = cubes.scale.y = 0.5
+        cubes.scale.z = 0.02
+        walls = mk('walls', 0, Marker.LINE_LIST)
+        walls.scale.x = 0.06
+        rooms = {r.cell for r in self.cells.rooms(self.cell_info)}
+        h = self.cells.size / 2.0
+        n = 1
+        for cell, ci in self.cell_info.items():
+            if ci.state != 'free' and cell not in self.visited_cells:
+                continue
+            cubes.points.append(Point(x=ci.centre[0], y=ci.centre[1], z=0.01))
+            cubes.colors.append(ColorRGBA(r=0.1, g=0.8, b=0.2, a=0.5) if cell in self.visited_cells
+                                else ColorRGBA(r=0.8, g=0.8, b=0.8, a=0.35))
+            looked = set(self.room_status.get(cell, {}).get('views_done', []))
+            for side in ci.walls:
+                nu, nv = SIDES[side]
+                col = (ColorRGBA(r=0.1, g=0.4, b=1.0, a=0.95) if side in looked
+                       else ColorRGBA(r=1.0, g=0.9, b=0.0, a=0.95))
+                for t in (-1.0, 1.0):
+                    du = nu * (h - 0.05) - nv * t * (h - 0.1)
+                    dv = nv * (h - 0.05) + nu * t * (h - 0.1)
+                    mx, my = self.cells.vec_to_map(du, dv)
+                    walls.points.append(Point(x=ci.centre[0] + mx, y=ci.centre[1] + my, z=0.05))
+                    walls.colors.append(col)
+            if cell in rooms:
+                st = self.room_status.get(cell, {})
+                label = mk('rooms', n, Marker.TEXT_VIEW_FACING)
+                n += 1
+                label.pose.position.x, label.pose.position.y = ci.centre
+                label.pose.position.z = 0.3
+                label.scale.z = 0.18
+                label.color = (ColorRGBA(r=0.3, g=0.6, b=1.0, a=1.0) if st.get('done')
+                               else ColorRGBA(r=0.8, g=0.3, b=1.0, a=1.0))
+                label.text = f'room {cell[0]},{cell[1]}' + (' ok' if st.get('done') else '')
+                arr.markers.append(label)
+        if cubes.points:
+            arr.markers.append(cubes)
+        if walls.points:
+            arr.markers.append(walls)
+        self.cells_pub.publish(arr)
+
     def stop(self):
         try:
-            if self.state in ('NAVIGATE', 'SPIN') and not self.P['dry_run']:
+            if self.state in ('NAVIGATE', 'SPIN', 'ROOM_LOOK') and not self.P['dry_run']:
                 self.nav.cancelTask()
         finally:
             self.publish_cmd()

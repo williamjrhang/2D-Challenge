@@ -3,6 +3,7 @@
   ros2 launch lite3_explore mission.launch.py                 # explorer in DRY RUN
   ros2 launch lite3_explore mission.launch.py live:=true      # robot drives itself
   ros2 launch lite3_explore mission.launch.py live:=true publish_obstacles:=true   # FULL RUN
+  ... room_check:=true         # + face each room's left/right wall from its doorway
   ... use_wall_pins:=true      # + lite3_wall_pins: QR / picture pins on the map (RViz only,
                                #   reports still come from qr_reader). New map id every launch.
 """
@@ -99,7 +100,10 @@ def generate_launch_description():
 
     decision_nodes = {
         'explorer': node('explorer', [os.path.join(cfg, 'explorer.yaml'),
-                                      {'dry_run': dry_run, 'mission_file': mission}]),
+                                      {'dry_run': dry_run, 'mission_file': mission,
+                                       'room_check': PythonExpression(
+                                           ["'", LaunchConfiguration('room_check'),
+                                            "' == 'true'"])}]),
         'special_obstacles': node('special_obstacles', [os.path.join(cfg, 'special.yaml')]),
         'mission_controller': node('mission_controller', [{'mission_file': mission}]),
     }
@@ -113,6 +117,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_yolo', default_value='true'),
         DeclareLaunchArgument('publish_obstacles', default_value='false',
                               description='true = YOLO detections trigger crossings'),
+        DeclareLaunchArgument('room_check', default_value='false',
+                              description='true = explorer checks rooms (QR walls up close)'),
         DeclareLaunchArgument('use_wall_pins', default_value='false',
                               description='true = also run lite3_wall_pins (QR pins in RViz)'),
         DeclareLaunchArgument('wall_pins_map_id', default_value='',
