@@ -70,7 +70,10 @@ frontier_explorer:
     coverage_enabled: true
     coverage_target: 0.95            # share of free cells (inside bounds) the camera must see
     camera_fov_deg: 70.0             # forward camera horizontal field of view
-    camera_range_m: 2.5              # distance at which a QR code is still readable
+    camera_range_m: 1.3              # distance at which a QR code is still readable. 24/11: was 2.5,
+                                     # but a 10-15 cm QR on the 640x480 camera reads only up to
+                                     # ~1.2 m (qr_reader tests) -> walls counted as 'seen' from 2.5 m
+                                     # were never readable. 1.3 m makes coverage drive close to them.
     robot_radius_m: 0.35             # cells the robot stood on also count as seen
     coverage_min_cluster_cells: 10   # ignore unseen patches smaller than this (10 x 5 cm cells)
     coverage_save_period_s: 10.0     # pose history saved this often (and on shutdown)

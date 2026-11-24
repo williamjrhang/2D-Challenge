@@ -3,6 +3,8 @@
   ros2 launch lite3_explore mission.launch.py                 # explorer in DRY RUN
   ros2 launch lite3_explore mission.launch.py live:=true      # robot drives itself
   ros2 launch lite3_explore mission.launch.py live:=true publish_obstacles:=true   # FULL RUN
+  ... use_wall_pins:=true      # + lite3_wall_pins: QR / picture pins on the map (RViz only,
+                               #   reports still come from qr_reader). New map id every launch.
 """
 import os
 from datetime import datetime, timezone
@@ -11,7 +13,9 @@ import re
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction,
+                            RegisterEventHandler)
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessIO
 from launch.logging import get_logger
@@ -66,6 +70,23 @@ def record_decisions(context, sources):
             for name, action in sources.items()]
 
 
+def wall_pins(context):
+    """lite3_wall_pins with a fresh map id (it refuses a pins file from another map)."""
+    if LaunchConfiguration('use_wall_pins').perform(context).lower() != 'true':
+        return []
+    try:
+        share = get_package_share_directory('lite3_wall_pins')
+    except Exception:  # noqa: BLE001
+        get_logger('lite3_explore').warning('use_wall_pins: lite3_wall_pins not installed')
+        return []
+    map_id = (LaunchConfiguration('wall_pins_map_id').perform(context)
+              or datetime.now().strftime('explore_%Y%m%d_%H%M%S'))
+    get_logger('lite3_explore').info(f'wall_pins map_id={map_id}')
+    return [IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(share, 'launch', 'wall_pins.launch.py')),
+        launch_arguments={'map_id': map_id, 'rviz': 'false'}.items())]
+
+
 def generate_launch_description():
     cfg = os.path.join(get_package_share_directory('lite3_explore'), 'config')
     live = LaunchConfiguration('live')
@@ -92,10 +113,15 @@ def generate_launch_description():
         DeclareLaunchArgument('use_yolo', default_value='true'),
         DeclareLaunchArgument('publish_obstacles', default_value='false',
                               description='true = YOLO detections trigger crossings'),
+        DeclareLaunchArgument('use_wall_pins', default_value='false',
+                              description='true = also run lite3_wall_pins (QR pins in RViz)'),
+        DeclareLaunchArgument('wall_pins_map_id', default_value='',
+                              description="'' = new id per launch (explore_<date_time>)"),
         DeclareLaunchArgument('decision_log', default_value='log/lite3_explore_decisions.log',
                               description='File to append live exploration decisions to'),
 
         OpaqueFunction(function=record_decisions, args=[decision_nodes]),
+        OpaqueFunction(function=wall_pins),
         *decision_nodes.values(),
         node('reporter', [{'mission_file': mission}]),
         node('vlm_watcher', [{'mission_file': mission}],
