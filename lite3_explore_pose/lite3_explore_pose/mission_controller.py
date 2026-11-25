@@ -138,6 +138,11 @@ class MissionController(Node):
         self.create_subscription(String, '/perception/room', self.on_room, 10)
         self.create_subscription(String, '/perception/scene', self.on_scene, 10)
         self.create_subscription(String, '/perception/found', self.on_found, 50)
+        # Issue 6: special_obstacles says AI mode is still on outside a crossing (stopped ON
+        # the stairs). Then nothing may drive the robot until a person sends exit_ai.
+        self.ai_active = False
+        self.create_subscription(Bool, '/special/ai_active', self.on_ai_active,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -236,6 +241,23 @@ class MissionController(Node):
             self.get_logger().warn(f'Event: {event} (no action yet)')
         else:
             self.get_logger().warn(f'Unknown perception event: "{event}"')
+
+    def on_ai_active(self, msg):
+        if msg.data != self.ai_active:
+            (self.get_logger().error if msg.data else self.get_logger().warn)(
+                f'special_obstacles: AI mode {"STILL ON (stairs)" if msg.data else "off"}')
+        self.ai_active = msg.data
+
+    def do_hold_ai(self):
+        if self.ai_active:
+            self.get_logger().error(
+                'HOLD_AI: AI mode is still on (robot stopped on the stairs). Walk it off with '
+                'the joystick, then: ros2 topic pub --once /special/start '
+                'std_msgs/msg/String "{data: exit_ai}"', throttle_duration_sec=5.0)
+            return
+        self.get_logger().warn('HOLD_AI: AI mode off again, back to EXPLORE.')
+        self.explore_done = False
+        self.enter('GO_TO_EXIT' if self.out_of_time else 'EXPLORE')
 
     def on_look_done(self, msg):
         self.look_done = msg.data
@@ -391,6 +413,12 @@ class MissionController(Node):
 
     def tick(self):
         ready = self.localization_ready()
+        # Issue 6: AI still on outside a crossing -> nobody drives (explorer paused).
+        if (getattr(self, 'ai_active', False)
+                and self.state not in ('TRAVERSE', 'DONE', 'HOLD_AI')):
+            self.cancel_nav()
+            self.enter('HOLD_AI')
+            return
         # Position jumped (broken SLAM / odometry)? Stop instead of chasing garbage goals.
         if ready and self.P['pose_jump_m'] > 0 and self.state != 'DONE':
             here = self.robot_xy()

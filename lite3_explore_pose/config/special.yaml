@@ -41,6 +41,14 @@ special_obstacles:
     stairs_up_and_down: true        # UP, platform, DOWN in ONE AI session: finish only after
                                     # tilting one way, then the other way, then level
     stairs_max_time_s: 120.0        # stairs time limit (max_time_s below is for the others)
+    # Leaving AI mode (issue 6). Stairs: 3 steps up, 3 down, 14 cm each (team, 26/11).
+    stairs_exit_after_m: 0.35       # m walked (odometry) after the last tilted step AND level for
+                                    # level_hold_s -> exit AI. 0.35: base_link -> rear feet ~0.3 m
+    stairs_exit_max_m: 0.9          # m; exit AI here at the latest (rule: <= 1 cell = 1.02 m after)
+    ai_exit_resend_auto: true       # after Exit AI send AUTO (gait.yaml 'auto') before the gait
+    ai_exit_wait_s: 1.5             # s after Exit AI before AUTO (AI takes a moment to switch off)
+    auto_to_gait_s: 1.0             # s after AUTO before the terrain gait
+    terrain_fresh_s: 1.5            # s; detector frame older than this = no data -> flat gait
 
     # ---- Distances (m) ----
     rubble_distance_m: 1.2          # TODO: rubble cell length + margin

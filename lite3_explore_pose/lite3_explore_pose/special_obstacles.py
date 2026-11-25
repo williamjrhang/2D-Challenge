@@ -25,6 +25,7 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
 import json
 import math
 
+from lite3_explore_pose.crossing import gait_after, stairs_exit
 from lite3_explore_pose.gait import (GAIT_COMMAND_QOS, GAIT_NAMES, GaitState, GaitTable,
                                      default_gait_file, send_gait)
 
@@ -35,7 +36,7 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 
 try:  # Lite3 custom message (exists on the lab computer, used for /simple_cmd)
     from transfer_interfaces.msg import MotionSimpleCMD
@@ -112,6 +113,18 @@ class SpecialObstacles(Node):
         # switched off on the platform. Works whatever the IMU's pitch sign convention is.
         p('stairs_up_and_down', True)
         p('stairs_max_time_s', 120.0)        # stairs time limit (up + platform + down is slow)
+        # Issue 6: leaving AI mode after the stairs. Exit only when level for level_hold_s
+        # AND odometry shows stairs_exit_after_m walked since the last tilted step (rear legs
+        # off); never later than stairs_exit_max_m (rule: exit at most 1 cell after).
+        p('stairs_exit_after_m', 0.35)
+        p('stairs_exit_max_m', 0.9)
+        # After Exit AI: wait ai_exit_wait_s, send AUTO (gait.yaml 'auto'), wait
+        # auto_to_gait_s, then the gait for the terrain ahead (rubble/potholes -> high step,
+        # flat or no fresh detector data -> flat).
+        p('ai_exit_resend_auto', True)
+        p('ai_exit_wait_s', 1.5)
+        p('auto_to_gait_s', 1.0)
+        p('terrain_fresh_s', 1.5)            # detector frame older than this = no data
 
         # Distances to walk
         p('rubble_distance_m', 1.2)          # TODO: size of a rubble cell + margin
@@ -199,6 +212,12 @@ class SpecialObstacles(Node):
         self.gait_cur_pub.publish(String(data=self.gait.current))
         # Other nodes (explorer at start) ask for a gait here instead of sending codes.
         self.create_subscription(String, '/gait/request', self.on_gait_request, 10)
+        # Issue 6: True while AI mode is still on outside a crossing (stopped ON the stairs).
+        # mission_controller holds the robot still until a person walks it off and sends
+        # /special/start exit_ai.
+        self.ai_pub = self.create_publisher(Bool, '/special/ai_active', latched)
+        self.ai_stuck = False
+        self.ai_pub.publish(Bool(data=False))
 
         # ---- memory ----
         self.roll = self.pitch = 0.0
@@ -236,8 +255,21 @@ class SpecialObstacles(Node):
             if self.phase != 'IDLE':
                 self.get_logger().warn('Stop requested by mission controller.')
                 self.stop_robot()
+                if self.in_ai and self.kind == 'stairs' and self.phase != 'RESTORE':
+                    # 22/11 lesson: never leave AI mode ON the stairs, also not on 'stop'
+                    # (localization loss / traverse timeout). Stand still, AI stays on.
+                    self.stairs_stuck('stop requested while on the stairs')
+                    return
                 self.restore_gait()
                 self.set_phase('IDLE')
+            return
+        if cmd == 'exit_ai':
+            self.manual_exit_ai()
+            return
+        if self.ai_stuck or (self.in_ai and self.phase == 'IDLE'):
+            self.get_logger().error(f'{cmd}: refused, AI mode is still ON (stairs). Walk the '
+                                    'robot off with the joystick, then /special/start exit_ai')
+            self.done_pub.publish(String(data='failed'))
             return
         if cmd not in ('stairs', 'rubble', 'curtain', 'potholes'):
             self.get_logger().warn(f'Unknown obstacle "{cmd}"')
@@ -423,15 +455,44 @@ class SpecialObstacles(Node):
         self.get_logger().warn(f'{self.kind}: ABORT ({reason})')
         self.set_phase('ABORT')
 
+    def stairs_stuck(self, why):
+        """Stopped ON the stairs: AI stays on, robot still, everybody is told."""
+        self.stop_robot()
+        self.ai_stuck = True
+        self.ai_pub.publish(Bool(data=True))
+        self.state_pub.publish(String(data='stairs:AI_STILL_ON'))
+        for _ in range(3):
+            self.get_logger().error(
+                f'stairs: {why}. AI mode stays ON, robot standing still. Walk it off the '
+                'stairs with the joystick (lite3_manual), then: ros2 topic pub --once '
+                "/special/start std_msgs/msg/String \"{data: exit_ai}\"")
+        self.set_phase('IDLE')
+
+    def manual_exit_ai(self):
+        """/special/start exit_ai: a person walked the robot off the stairs."""
+        if not (self.in_ai or self.ai_stuck):
+            self.get_logger().warn('exit_ai: AI mode is not on (nothing to do)')
+            self.ai_pub.publish(Bool(data=False))
+            return
+        if self.phase not in ('IDLE',):
+            self.get_logger().warn(f'exit_ai: refused during {self.kind} {self.phase}')
+            return
+        self.get_logger().warn('exit_ai: manual recovery, leaving AI mode now')
+        self.kind = 'stairs'
+        self.set_gait('ai_exit', 'manual exit_ai')
+        self.in_ai = False
+        self.ai_stuck = False
+        self.pending_result = None              # nobody waits for /special/done
+        self.restore_sent = self.restore_auto_sent = False
+        self.set_phase('RESTORE')
+
     def finish(self, result):
         self.stop_robot()
         if self.in_ai and self.kind == 'stairs' and result == 'failed':
             # 22/11: an abort on top of the stairs switched AI off -> normal gait on the steps.
             # Stay in AI mode and stand still; a person finishes with the joystick.
-            self.in_ai = False                     # no longer ours to manage
-            self.get_logger().error('stairs: stopped ON the stairs, AI mode stays ON. '
-                                    'Finish with the joystick (lite3_manual), then exit AI.')
             self.report(result)
+            self.stairs_stuck('stopped ON the stairs (crossing failed)')
             return
         if self.in_ai:
             # Leave AI mode, stand still, then normal gait, THEN report (see do_restore).
@@ -439,19 +500,35 @@ class SpecialObstacles(Node):
             self.in_ai = False
             self.get_logger().info('stairs: AI mode OFF')
             self.pending_result = result
-            self.restore_sent = False
+            self.restore_sent = self.restore_auto_sent = False
             self.set_phase('RESTORE')
             return
         self.restore_gait()
         self.report(result)
 
     def do_restore(self):
+        """After Exit AI: wait -> AUTO -> wait -> gait for the terrain ahead -> report."""
         self.stop_robot()
-        if not self.restore_sent and self.in_phase_s() >= 1.5:
-            self.set_gait('flat', 'after the stairs')
+        t = self.in_phase_s()
+        wait, to_gait = self.P['ai_exit_wait_s'], self.P['auto_to_gait_s']
+        if (not getattr(self, 'restore_auto_sent', False) and t >= wait
+                and self.P['ai_exit_resend_auto']):
+            self.send_gait(self.gaits.code('auto'))
+            self.get_logger().info('stairs: AUTO re-sent after Exit AI')
+            self.restore_auto_sent = True
+        if not self.restore_sent and t >= wait + to_gait:
+            age = None if self.last_dets is None else self.now_s() - self.last_dets[0]
+            name, why = gait_after(None if self.last_dets is None else self.last_dets[1], age,
+                                   self.P['terrain_fresh_s'],
+                                   terrain_gait=self.gaits.for_terrain)
+            self.set_gait(name, f'after the stairs: {why}')
             self.restore_sent = True
-        if self.in_phase_s() >= 3.0:
-            self.report(self.pending_result)
+        if t >= wait + to_gait + 1.0:
+            self.ai_pub.publish(Bool(data=False))
+            if self.pending_result is None:
+                self.set_phase('IDLE')
+            else:
+                self.report(self.pending_result)
 
     def report(self, result):
         self.get_logger().info(f'{self.kind}: {result}')
@@ -634,6 +711,7 @@ class SpecialObstacles(Node):
                     self.get_logger().info(f'stairs: on the second flight (pitch {pitch_deg:.0f} deg)')
                 self.was_on_stairs = True
                 self.level_since = None
+                self.last_tilt_m = self.travelled()     # issue 6: exit distance from here
             elif self.was_on_stairs and abs(pitch_deg) < self.P['level_pitch_deg']:
                 if self.P['stairs_up_and_down'] and not self.second_flight:
                     # Level, but only after one flight: this is the platform. Keep AI on and
@@ -642,11 +720,20 @@ class SpecialObstacles(Node):
                     if not self.platform_logged:
                         self.platform_logged = True
                         self.get_logger().info('stairs: level on the platform, keep walking (AI stays on)')
-                elif self.level_since is None:
-                    self.level_since = now
-                elif (now - self.level_since > self.P['level_hold_s']
-                      and dist(self.P['stairs_min_distance_m'])):
-                    self.finish('success')
+                else:
+                    if self.level_since is None:
+                        self.level_since = now
+                    past = self.travelled() - getattr(self, 'last_tilt_m', 0.0)
+                    step = stairs_exit(now - self.level_since, past, True,
+                                       self.P['level_hold_s'], self.P['stairs_exit_after_m'],
+                                       self.P['stairs_exit_max_m'])
+                    if step != 'wait' and dist(self.P['stairs_min_distance_m']):
+                        self.get_logger().info(
+                            f'stairs: off the stairs, level {now - self.level_since:.1f} s, '
+                            f'{past:.2f} m past the last step'
+                            + (' (1-cell limit reached)' if step == 'exit_cap' else '')
+                            + ' -> exit AI')
+                        self.finish('success')
         elif self.kind in ('rubble', 'potholes') and self.P['terrain_follow']:
             self.follow_terrain(now, dist)
         elif dist(self.walk_m):
