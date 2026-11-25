@@ -16,5 +16,5 @@ codes:
 # Terrain kind (obstacle_detector) -> gait. "Uneven terrain" = rubble and potholes.
 # Not listed (curtain) = keep the current gait.
 terrain:
-  rubble: high_step
+  rubble: high_step           # 22 Nov: was RUG General 0x21010401, H-Step at the team's request
   potholes: high_step
