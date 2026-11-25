@@ -1,7 +1,7 @@
 # Competition-day settings, read by vlm_watcher, qr_reader, reporter and mission_controller.
 # Everything marked TODO must be filled in from the organisers' lists before the run.
 
-group_id: group05                 # COMPETITION DAY: group05_<PIN> (booklet v6.1). Same id for the
+group_id: Group05_Gp05            # registered 25 Nov (exact spelling matters). Same id for the
                                   # scene server AND the scoring server.
 
 scene_server: http://192.168.10.141:8000/analyze
