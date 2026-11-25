@@ -43,12 +43,6 @@ from std_msgs.msg import Float32  # [COVER]
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
-try:  # Lite3 custom message for /simple_cmd (gait switching)
-    from transfer_interfaces.msg import MotionSimpleCMD
-except ImportError:
-    MotionSimpleCMD = None
-
-from lite3_explore_pose.gait import GAIT_COMMAND_QOS, send_gait
 from lite3_explore_pose.frontiers import (
     MapInfo, find_frontiers, score_frontiers, still_frontier,
 )
@@ -108,8 +102,10 @@ class FrontierExplorer(Node):
         p('pose_goal_cooldown_s', 15.0)
         p('cmd_vel_topic', '/nav_cmd_vel')  # twist_mux input, never /cmd_vel
         p('tick_hz', 5.0)
-        p('gait_code', 0)                # gait to use for the whole run (0 = don't switch)
-        p('gait_via_manual', False)      # true = fallback: manual -> gait -> auto
+        # Gait at start (issue 4): asked from the gait owner (special_obstacles) on
+        # /gait/request with a name from config/gait.yaml; the explorer never sends codes.
+        # '' = keep the current gait.
+        p('start_gait', 'flat')
 
         p('initial_spin', True)          # Nav2 look-around spin at start (collision-checked)
         p('spin_speed', 0.5)             # rad/s
@@ -215,7 +211,7 @@ class FrontierExplorer(Node):
             'time_limit_base_s', 'time_limit_per_m_s', 'progress_window_s',
             'min_progress_m', 'recheck_period_s', 'blacklist_radius_m',
             'backup_speed', 'backup_time_s', 'max_consecutive_failures',
-            'done_after_empty_checks', 'gait_code', 'gait_via_manual',
+            'done_after_empty_checks', 'start_gait',
             'bounds', 'guard_radius_m', 'goal_spin_deg', 'goal_spin_min_gap_m',
             'odom_frame', 'pose_max_age_s', 'slam_max_age_s', 'pose_settle_s',
             'pose_result_wait_s', 'pose_goal_tolerance_m', 'pose_goal_cooldown_s',
@@ -324,9 +320,9 @@ class FrontierExplorer(Node):
             self.coverage_pub = self.create_publisher(OccupancyGrid, '/exploration/coverage', map_qos)
             self.trail_pub = self.create_publisher(Path, '/exploration/trail', 10)
             self.coverage_pct_pub = self.create_publisher(Float32, '/exploration/coverage_pct', 10)
-        self.gait_pub = None
-        if MotionSimpleCMD is not None:
-            self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', GAIT_COMMAND_QOS)
+        self.gait_req_pub = self.create_publisher(String, '/gait/request', 10)
+        self.gait_current = None
+        self.create_subscription(String, '/gait/current', self.on_gait_current, map_qos)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -420,6 +416,9 @@ class FrontierExplorer(Node):
             self.covering = False  # [COVER] new area may be open: frontiers first again
             self.cover_empty_checks = 0
             self.set_state('SELECT')
+
+    def on_gait_current(self, msg):
+        self.gait_current = msg.data
 
     def on_turn_hold(self, msg):
         self.turn_hold_active = msg.data
@@ -862,15 +861,12 @@ class FrontierExplorer(Node):
         if self.grid is None or pose is None:
             self.log_missing_inputs(pose)
             return
-        if self.P['gait_code'] and not self.P['dry_run']:
-            if self.gait_pub is None:
-                self.get_logger().warn('transfer_interfaces not found: cannot set gait.')
-            else:
-                self.send_gait()
-                self.gait_resent = False
-                self.state_end = self.now_s() + 2.0   # stand still while the gait changes
-                self.set_state('GAIT')
-                return
+        if self.P['start_gait'] and not self.P['dry_run']:
+            self.send_gait()
+            self.gait_resent = False
+            self.state_end = self.now_s() + 2.0   # stand still while the gait changes
+            self.set_state('GAIT')
+            return
         self.start_exploring()
 
     def log_missing_inputs(self, pose):
@@ -884,8 +880,9 @@ class FrontierExplorer(Node):
                                throttle_duration_sec=self.P.get('idle_warn_period_s', 5.0))
 
     def send_gait(self):
-        send_gait(self.gait_pub, MotionSimpleCMD, self.P['gait_code'], self.get_logger(),
-                  via_manual=self.P['gait_via_manual'])
+        """Ask the gait owner (special_obstacles) for the start gait."""
+        self.get_logger().info(f'Requesting gait {self.P["start_gait"]!r} on /gait/request')
+        self.gait_req_pub.publish(String(data=self.P['start_gait']))
 
     def do_gait(self, pose):
         self.publish_cmd()
@@ -894,6 +891,11 @@ class FrontierExplorer(Node):
             self.send_gait()      # send twice in case the first one was missed
             self.gait_resent = True
         if remaining <= 0:
+            if self.gait_current != self.P['start_gait']:
+                self.get_logger().warn(
+                    f'Gait owner did not confirm {self.P["start_gait"]!r} on /gait/current '
+                    f'(now {self.gait_current!r}): is special_obstacles running? Exploring '
+                    'in the current gait.')
             self.start_exploring()
 
     def start_exploring(self):

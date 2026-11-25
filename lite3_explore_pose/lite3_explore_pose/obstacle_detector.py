@@ -336,6 +336,11 @@ class ObstacleDetector(Node):
             kind, dist, stats = self.floor_check(snap)
             if stairs_shape and kind in ('rubble', 'potholes'):
                 stats = dict(stats, suppressed=f'{kind}: stairs shape')
+                # Issue 4: say it loudly, a false stairs shape would hide real rubble
+                self.get_logger().warn(
+                    f'floor check said {kind} at {dist} m (bump {stats.get("bump")}, hole '
+                    f'{stats.get("hole")}, wall {stats.get("wall")}) but the stairs shape '
+                    f'wins: NOT sent as {kind}', throttle_duration_sec=2.0)
                 kind = None                            # the steps are not rubble
             if kind == 'rubble' and dist is not None:
                 self.report_sighting('rubble', dist + 0.3, 0.0)   # +0.3: middle of the rubble

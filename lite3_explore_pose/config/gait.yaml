@@ -1,0 +1,20 @@
+# THE gait table: the only place gait / mode codes for /simple_cmd are written (issue 4).
+# Read by special_obstacles (the gait owner, publishes latched /gait/current) and, through
+# /gait/request, by the explorer. gait.py refuses any code not in its TESTED_CODES list.
+#
+# Codes confirmed by the team (26/11): 0x21010300 flat, 0x21010407 RUG H-Step (high step).
+# Mode codes tested earlier: 0x21010C02 manual, 0x21010C03 auto, 0x21010528 enter AI,
+# 0x2101052B exit AI. Gaits only switch in Move mode, NOT in AI state.
+codes:
+  flat: "0x21010300"          # Flat gait, Slow gear (default standing gait)
+  high_step: "0x21010407"     # RUG gait, H-Step gear (high-lift steps; potholes hand-tested 17/11)
+  ai_enter: "0x21010528"      # stairs ONLY (organisers' rule: max 1 cell before / after)
+  ai_exit: "0x2101052B"
+  auto: "0x21010C03"          # re-sent after Enter AI (22/11) and after Exit AI (issue 6)
+  manual: "0x21010C02"        # only for gait_via_manual: true (fallback)
+
+# Terrain kind (obstacle_detector) -> gait. "Uneven terrain" = rubble and potholes.
+# Not listed (curtain) = keep the current gait.
+terrain:
+  rubble: high_step
+  potholes: high_step

@@ -25,14 +25,15 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
 import json
 import math
 
-from lite3_explore_pose.gait import GAIT_COMMAND_QOS, send_gait
+from lite3_explore_pose.gait import (GAIT_COMMAND_QOS, GAIT_NAMES, GaitState, GaitTable,
+                                     default_gait_file, send_gait)
 
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32, String
 
@@ -74,22 +75,18 @@ class SpecialObstacles(Node):
         p('cmd_vel_topic', '/nav_cmd_vel')    # twist_mux input, never /cmd_vel
         p('tick_hz', 20.0)
 
-        # Gait codes for /simple_cmd. 0 = don't switch gait.
-        # TODO: ask TA / Lite3 manual. Never guess codes on the real robot.
-        p('normal_gait_code', 0)
-        p('stairs_gait_code', 0)
-        p('rubble_gait_code', 0)
-        p('potholes_gait_code', 0)
+        # Gait / mode codes: ONLY from the shared table config/gait.yaml (issue 4), never
+        # guessed here. '' = the installed config/gait.yaml. This node OWNS the gait:
+        # every switch is logged and published latched on /gait/current.
+        p('gait_file', '')
         # Stairs: organisers allow the robot's AI gait ONLY for the stairs (enter at most
         # 1 cell before, exit at most 1 cell after). Gait codes do not work while in AI state,
-        # so: exit AI first, wait, then send normal_gait_code.
+        # so: exit AI first, wait, then the flat gait.
         p('stairs_use_ai_mode', True)
-        p('ai_enter_code', 553714984)        # 0x21010528 Enter AI
-        p('ai_exit_code', 553714987)         # 0x2101052B Exit AI
         # 22/11: in AI mode the robot ignored /cmd_vel from code (joystick in manual mode
-        # worked). Entering AI may hand control back to the controller, so send AUTO again
-        # 1 s after Enter AI. 0 = don't.
-        p('ai_auto_code', 553716739)         # 0x21010C03 auto, re-sent after Enter AI (22/11)
+        # worked). Entering AI may hand control back to the controller, so send AUTO
+        # (gait.yaml 'auto') again 1 s after Enter AI.
+        p('ai_resend_auto', True)
         # Stairs-only progress check: climbing the first step is slow.
         p('stairs_progress_window_s', 10.0)
         p('stairs_min_progress_m', 0.05)
@@ -163,6 +160,17 @@ class SpecialObstacles(Node):
         p('terrain_max_factor', 1.6)
 
         self.P = {name: self.get_parameter(name).value for name in names}
+        path = self.P['gait_file'] or default_gait_file()
+        try:
+            self.gaits, errors = GaitTable.load(path)
+        except (OSError, ValueError) as e:
+            self.gaits, errors = GaitTable(), [f'cannot read gait table {path}: {e!r}']
+        for err in errors:
+            self.get_logger().error(err)
+        self.get_logger().info(f'Gait table {path}: '
+                               + ', '.join(f'{k}={hex(v)}' for k, v in self.gaits.codes.items())
+                               + f'; terrain {self.gaits.terrain}')
+        self.gait = GaitState()
 
         # ---- ROS interfaces ----
         self.create_subscription(String, '/special/start', self.on_start, 10)
@@ -186,6 +194,11 @@ class SpecialObstacles(Node):
         self.gait_pub = None
         if MotionSimpleCMD is not None:
             self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', GAIT_COMMAND_QOS)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.gait_cur_pub = self.create_publisher(String, '/gait/current', latched)
+        self.gait_cur_pub.publish(String(data=self.gait.current))
+        # Other nodes (explorer at start) ask for a gait here instead of sending codes.
+        self.create_subscription(String, '/gait/request', self.on_gait_request, 10)
 
         # ---- memory ----
         self.roll = self.pitch = 0.0
@@ -264,7 +277,7 @@ class SpecialObstacles(Node):
                                    f'({self.start_dist:.2f} m): not terrain, NOT crossing')
             self.report('failed')
             return
-        self.get_logger().info(f'Starting {cmd} crossing.')
+        self.get_logger().info(f'Starting {cmd} crossing. Terrain stats: {self.terrain_stats(cmd)}')
         self.set_phase('SETTLE')
 
     def on_dets(self, msg):
@@ -272,6 +285,17 @@ class SpecialObstacles(Node):
             self.last_dets = (self.now_s(), json.loads(msg.data))
         except ValueError:
             pass
+
+    def terrain_stats(self, kind):
+        """Detector numbers behind this crossing (bump / hole / wall fractions, distance)."""
+        if self.last_dets is None:
+            return 'no detector data'
+        age = self.now_s() - self.last_dets[0]
+        keys = ('forward_m', 'located_by', 'bump', 'hole', 'wall', 'wall_at', 'bar_at', 'n',
+                'suppressed', 'wrinkle_mm', 'steps', 'rises', 'yaw_deg')
+        out = [{k: d[k] for k in keys if k in d} for d in self.last_dets[1]
+               if d.get('kind') == kind]
+        return f'{out or "none of this kind"} ({age:.1f} s old)'
 
     def measured_distance(self, kind):
         """Distance to the obstacle that triggered this crossing, or None."""
@@ -331,16 +355,47 @@ class SpecialObstacles(Node):
                   via_manual=self.P['gait_via_manual'])
 
     def gait_code_for(self, kind):
-        return self.P.get(f'{kind}_gait_code', 0)   # curtain has no special gait
+        name = self.gaits.for_terrain(kind)          # curtain has no special gait
+        return self.gaits.code(name) if name else 0
+
+    def set_gait(self, name, why):
+        """THE way to change gait / mode: table code -> /simple_cmd, log, /gait/current.
+        name: 'flat' | 'high_step' | 'ai' (enter) | 'ai_exit' | 'auto'."""
+        code = {'ai': self.gaits.code('ai_enter')}.get(name, self.gaits.code(name))
+        if not code:
+            self.get_logger().error(f'GAIT: no tested code for {name!r} in the gait table, '
+                                    f'NOT switching ({why})')
+            return False
+        self.send_gait(code)
+        state = {'ai_exit': 'ai_off', 'auto': self.gait.current}.get(name, name)
+        old = self.gait.current
+        self.gait.switch(state, why, self.now_s())
+        self.get_logger().warn(f'GAIT: {old} -> {state} ({hex(code)}, {why})')
+        self.gait_cur_pub.publish(String(data=state))
+        return True
+
+    def on_gait_request(self, msg):
+        name = msg.data.strip()
+        if name not in GAIT_NAMES:
+            self.get_logger().warn(f'/gait/request {name!r}: unknown (use {GAIT_NAMES})')
+            return
+        if self.phase != 'IDLE' or self.in_ai:
+            self.get_logger().warn(f'/gait/request {name!r} ignored: {self.kind} {self.phase}'
+                                   f'{" (AI on)" if self.in_ai else ""}')
+            return
+        if self.gait.current == name:
+            self.gait_cur_pub.publish(String(data=name))   # confirm
+            return
+        self.set_gait(name, 'requested on /gait/request')
 
     def restore_gait(self):
         # Only switch back if we switched away from the normal gait.
         if self.in_ai:
-            self.send_gait(self.P['ai_exit_code'])        # immediate (used for 'stop')
+            self.set_gait('ai_exit', 'stop: leaving AI')     # immediate (used for 'stop')
             self.in_ai = False
-            self.send_gait(self.P['normal_gait_code'])
+            self.set_gait('flat', 'stop: back to flat')
         elif self.kind and self.gait_code_for(self.kind):
-            self.send_gait(self.P['normal_gait_code'])
+            self.set_gait('flat', f'{self.kind}: back to flat')
 
     def update_pose(self):
         o = self.odom.get(self.odom_src) if self.odom_src else None
@@ -380,7 +435,7 @@ class SpecialObstacles(Node):
             return
         if self.in_ai:
             # Leave AI mode, stand still, then normal gait, THEN report (see do_restore).
-            self.send_gait(self.P['ai_exit_code'])
+            self.set_gait('ai_exit', 'stairs finished')
             self.in_ai = False
             self.get_logger().info('stairs: AI mode OFF')
             self.pending_result = result
@@ -393,7 +448,7 @@ class SpecialObstacles(Node):
     def do_restore(self):
         self.stop_robot()
         if not self.restore_sent and self.in_phase_s() >= 1.5:
-            self.send_gait(self.P['normal_gait_code'])
+            self.set_gait('flat', 'after the stairs')
             self.restore_sent = True
         if self.in_phase_s() >= 3.0:
             self.report(self.pending_result)
@@ -440,7 +495,7 @@ class SpecialObstacles(Node):
                 self.finish('failed')
                 return
             if self.kind == 'stairs' and self.P['stairs_use_ai_mode']:
-                self.send_gait(self.P['ai_enter_code'])
+                self.set_gait('ai', 'stairs ahead')
                 self.in_ai = True
                 self.ai_auto_count = 0
                 self.get_logger().info('stairs: AI mode ON')
@@ -448,7 +503,7 @@ class SpecialObstacles(Node):
                 return
             code = self.gait_code_for(self.kind)
             if code:
-                self.send_gait(code)
+                self.set_gait(self.gaits.for_terrain(self.kind), f'{self.kind} crossing')
                 self.gait_resent = False
                 self.set_phase('GAIT')
             else:
@@ -464,11 +519,11 @@ class SpecialObstacles(Node):
             self.gait_resent = True
         # AI mode: re-assert AUTO (ROS commands) at 1 s and 2.5 s after Enter AI. 22/11: one
         # send at 1 s sometimes landed while AI was still switching on and was ignored.
-        if self.in_ai and self.P['ai_auto_code']:
+        if self.in_ai and self.P['ai_resend_auto']:
             sent = getattr(self, 'ai_auto_count', 2)
             due = (1.0, 2.5)
             if sent < len(due) and self.in_phase_s() >= due[sent]:
-                self.send_gait(self.P['ai_auto_code'])
+                self.send_gait(self.gaits.code('auto'))
                 self.ai_auto_count = sent + 1
                 self.get_logger().info(f'stairs: AUTO re-sent after entering AI mode ({sent + 1}/2)')
         wait = 3.0 if self.in_ai else 2.0    # AI mode takes longer to switch on
@@ -521,8 +576,8 @@ class SpecialObstacles(Node):
                 self.stairs_boost = min(top, self.stairs_boost + self.P['stairs_boost_step'])
                 self.get_logger().warn(f'stairs: not moving, pushing harder: '
                                        f'{base + self.stairs_boost:.2f} m/s')
-            if self.in_ai and self.P['ai_auto_code']:
-                self.send_gait(self.P['ai_auto_code'])   # maybe AUTO was not taken: again
+            if self.in_ai and self.P['ai_resend_auto']:
+                self.send_gait(self.gaits.code('auto'))  # maybe AUTO was not taken: again
                 self.get_logger().warn('stairs: not moving, AUTO re-sent')
             self.stall_t = now
         return base + self.stairs_boost

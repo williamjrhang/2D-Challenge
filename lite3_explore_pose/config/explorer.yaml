@@ -21,11 +21,10 @@ frontier_explorer:
     cmd_vel_topic: /nav_cmd_vel  # twist_mux input, so the joystick (priority 100) can override
     tick_hz: 5.0
 
-    # Starting gait (flat floor), sent once at start (live only). 0 = keep current gait.
-    # Terrain gaits are switched by special_obstacles when an obstacle is detected.
-    # Must match normal_gait_code in special.yaml (crossings switch back to it).
-    gait_code: 553714432            # 0x21010300 Flat Slow
-    gait_via_manual: false          # same as special.yaml (false = direct, as on 17/11)
+    # Starting gait (issue 4): a NAME from config/gait.yaml, asked from the gait owner
+    # (special_obstacles) on /gait/request; it sends the code and confirms on /gait/current.
+    # Codes are written only in config/gait.yaml. '' = keep the current gait.
+    start_gait: flat
 
     # Opening 360 deg scan (skipped in dry run)
     initial_spin: true       # look-around for the CAMERA; done by Nav2 spin (stops before hitting walls)

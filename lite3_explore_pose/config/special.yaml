@@ -5,20 +5,10 @@ special_obstacles:
     odom_topics: [/odom, /leg_odom2]   # /odom = Fast-LIO (odom_relay), doesn't slip -> first. First fresh one is used; none -> walk by time
     cmd_vel_topic: /nav_cmd_vel     # twist_mux input (joystick /joy_cmd_vel overrides). NEVER /cmd_vel
 
-    # ---- Gait codes for /simple_cmd (0 = don't switch) ----
-    # From the Jueying Lite3 guide, "Motion Host Communication Interface" 1.2.5.
-    # Written in decimal because ROS parameter files may not read 0x... as a number.
-    #   553714432 = 0x21010300  Flat gait, Slow gear   (default standing gait)
-    #   553714439 = 0x21010307  Flat gait, Medium gear
-    #   553714694 = 0x21010406  Flat gait, Crawl gear
-    #   553714689 = 0x21010401  RUG gait, General gear (rough ground)
-    #   553714690 = 0x21010402  RUG gait, Grip gear
-    #   553714695 = 0x21010407  RUG gait, H-Step gear  (high-lift steps)
-    # Gaits only switch in Move mode and NOT in AI state.
-    # Start with 0 (off) and switch them on one at a time after a hand test.
-    # Gait per terrain (hand-tested 17/11). After every crossing it goes back to normal_gait_code.
-    normal_gait_code: 553714432     # 0x21010300 Flat Slow  - flat floor (= explorer gait_code)
-    stairs_gait_code: 0             # not used while stairs_use_ai_mode is true
+    # ---- Gait codes: ONLY in config/gait.yaml (issue 4). This node owns the gait,
+    # logs every switch and publishes it latched on /gait/current (flat / high_step / ai).
+    # Terrain -> gait is in gait.yaml too (rubble, potholes -> high_step).
+    gait_file: ""                    # "" = installed config/gait.yaml
 
     # ---- Stairs = AI mode (organisers' rule, 17/11) ----
     # ONLY for stairs: enter at most 1 cell before, exit at most 1 cell after.
@@ -27,9 +17,7 @@ special_obstacles:
     # false = send gait codes directly (worked in auto mode for potholes on 17/11).
     # true  = code flips manual -> gait -> auto in 0.6 s (fallback, only if direct fails).
     gait_via_manual: false
-    ai_enter_code: 553714984        # 0x21010528 Enter AI
-    ai_exit_code: 553714987         # 0x2101052B Exit AI  (then normal_gait_code is sent)
-    ai_auto_code: 553716739         # 0x21010C03 auto, re-sent 1 s after Enter AI: without it AI mode ignores code commands (22 Nov). 0 = off
+    ai_resend_auto: true            # gait.yaml 'auto' re-sent 1 s after Enter AI: without it AI mode ignores code commands (22 Nov)
     stairs_progress_window_s: 15.0  # stairs only: must move stairs_min_progress_m in this time (was 10)
     stairs_min_progress_m: 0.05
     stairs_max_pitch_deg: 45.0      # 22 Nov: a step briefly pitched 40 deg and aborted
@@ -37,8 +25,6 @@ special_obstacles:
     stairs_stall_s: 4.0             # not moving this long on the stairs -> push harder ...
     stairs_boost_step: 0.02         # ... by this much each time ...
     stairs_max_speed: 0.20          # ... up to this (AI mode stood still at the top edge, 22 Nov)
-    rubble_gait_code: 553714695   # 0x21010407 RUG H-Step (was 0x21010401 RUG General, changed 22 Nov at the team's request)
-    potholes_gait_code: 553714695   # 0x21010407 RUG H-Step   - potholes        ✅ tested
 
     # ---- Speeds (m/s): start slow, raise only after it works ----
     stairs_speed: 0.15              # 22 Nov AI mode: 0.03 / 0.10 / 0.13 / 0.14 did not move; 0.15 climbs (keep the robot square to the stairs)
