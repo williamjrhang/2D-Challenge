@@ -141,11 +141,30 @@ class CellGrid:
                     out.append((i, j))
         return out
 
+    def _crop(self, grid, info, cells):
+        """Only the part of the map around the cells: after a SLAM jump /map can have
+        >10 M cells, and dilating all of it every update cost a full CPU core (25 Nov)."""
+        from types import SimpleNamespace
+        m = self.size / 2.0 + self.band + self.clearance + 0.2
+        xs = [self.centre(c)[0] for c in cells] or [0.0]
+        ys = [self.centre(c)[1] for c in cells] or [0.0]
+        res = info.resolution
+        c0 = max(0, int(math.floor((min(xs) - m * 1.5 - info.origin_x) / res)))
+        r0 = max(0, int(math.floor((min(ys) - m * 1.5 - info.origin_y) / res)))
+        c1 = min(info.width, int(math.ceil((max(xs) + m * 1.5 - info.origin_x) / res)))
+        r1 = min(info.height, int(math.ceil((max(ys) + m * 1.5 - info.origin_y) / res)))
+        sub = grid[r0:max(r0, r1), c0:max(c0, c1)]
+        return sub, SimpleNamespace(resolution=res, origin_x=info.origin_x + c0 * res,
+                                    origin_y=info.origin_y + r0 * res,
+                                    width=sub.shape[1], height=sub.shape[0])
+
     def analyze(self, grid, info, free_max=25, occupied_min=65):
         from lite3_explore.coverage import dilate
+        cells = self.candidate_cells(info)
+        grid, info = self._crop(grid, info, cells)
         occ_near = dilate(grid >= occupied_min, int(math.ceil(self.clearance / info.resolution)))
         out = {}
-        for cell in self.candidate_cells(info):
+        for cell in cells:
             xs, ys = self._to_map(cell, self._visit_uv)
             k = self._cats(grid, info, xs, ys, free_max, occupied_min)
             n = float(k.size)
