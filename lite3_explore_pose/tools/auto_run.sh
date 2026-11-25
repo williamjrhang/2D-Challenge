@@ -17,6 +17,10 @@ source ~/lite3_ws/install/setup.bash
 source ~/ros2_ws/install/setup.bash
 source ~/challenge_ws/install/setup.bash
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-5}
+# Same one-NIC Fast DDS profile as robot.launch.py / mission.launch.py / record_autonomy.sh:
+# processes WITHOUT it cannot see the robot launch's nodes (26/11: preflight said 'no
+# /fastlio/odometry' while FAST-LIO ran at 10 Hz). Profile file unchanged.
+export FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-$HOME/challenge_ws/install/lite3_explore_pose/share/lite3_explore_pose/config/fastdds_one_nic.xml}
 
 TOOLS=~/challenge_ws/lite3_explore_pose/tools
 dir=~/challenge_ws/runs/auto_$(date +%Y%m%d_%H%M%S)
