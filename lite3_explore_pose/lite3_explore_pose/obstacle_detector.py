@@ -142,6 +142,10 @@ class ObstacleDetector(Node):
         p('shadow_dark_frac', 0.15)      # share of shadow cells for 'potholes'
         p('shadow_min_brightness', 40.0) # floor darker than this: lighting check not trusted
         p('shadow_distance_m', 0.8)      # rough distance reported (bottom third = right ahead)
+        # Issue 9 (desktop): depth from the robot's link_relay (thinned cloud, ~2 Hz) instead
+        # of the raw 640x480 cloud. Defaults = today (raw topic, one cloud on demand per frame).
+        p('cloud_topic', '/camera/depth/points')
+        p('cloud_on_demand', True)
         self.P = {n: self.get_parameter(n).value for n in names}
 
         self.tf_buffer = Buffer()
@@ -152,7 +156,8 @@ class ObstacleDetector(Node):
         # stream. 25/11: at mission start the 640x480 cloud (~5 MB each) choked the robot
         # link, /livox/imu fell from 200 Hz to 5 Hz and FAST-LIO odometry went 24 s stale.
         self.locator = Locator(self, self.tf_buffer, global_frame='base_link',
-                               cloud_on_demand=True)
+                               cloud_topic=self.P['cloud_topic'],
+                               cloud_on_demand=self.P['cloud_on_demand'])
 
         self.create_subscription(CompressedImage, self.P['image_topic'], self.on_image,
                                  qos_profile_sensor_data)

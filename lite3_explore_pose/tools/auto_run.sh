@@ -71,9 +71,9 @@ nogo() {
 }
 
 # ---- 0. nothing already running (two robot launches = two FAST-LIOs fighting over TF)
-if pgrep -f 'lite3_launcher lite3.launch.py|lite3_explore_pose mission.launch.py|fastlio_mapping' > /dev/null; then
+if pgrep -f 'lite3_launcher lite3.launch.py|lite3_explore_pose robot.launch.py|lite3_explore_pose mission.launch.py|fastlio_mapping' > /dev/null; then
     echo "A robot launch / mission / FAST-LIO is already running on this PC:"
-    pgrep -af 'lite3_launcher lite3.launch.py|lite3_explore_pose mission.launch.py|fastlio_mapping'
+    pgrep -af 'lite3_launcher lite3.launch.py|lite3_explore_pose robot.launch.py|lite3_explore_pose mission.launch.py|fastlio_mapping'
     echo "Stop it first (or ask who started it). Nothing started."
     exit 1
 fi
@@ -81,7 +81,9 @@ df -h ~ | tail -1 | awk '{print "Disk free: "$4"  (the bag needs ~4 MB/s, 15 min
 
 # ---- 1. robot + SLAM + Nav2 (no motion)
 say "1/6 Robot launch (FAST-LIO, SLAM, Nav2) - the robot does not move"
-start ROBOT robot ros2 launch lite3_launcher lite3.launch.py slam:=True navigation:=True
+# robot.launch.py = the same lite3_launcher bringup + turn_hold (3 s still after a Nav2
+# turn; it was missing in auto runs before 26/11). relay:=false: one machine, no desktop.
+start ROBOT robot ros2 launch lite3_explore_pose robot.launch.py slam:=True navigation:=True relay:=false
 sleep 25
 grep -q 'max_lidar_backlog 3' "$dir/robot.log" \
     || echo "WARNING: FAST-LIO did not log 'max_lidar_backlog 3' - old build or config?"

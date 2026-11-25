@@ -1,0 +1,20 @@
+# Robot-side relay for the desktop (issue 9). Runs on the Lite3 next to the camera driver.
+link_relay:
+  ros__parameters:
+    image_in: /camera/color/image_raw/compressed
+    image_out: /camera/color/image_throttled/compressed   # desktop image_topic
+    image_rate_hz: 5.0          # Hz; QR reader 3 Hz, YOLO 2 Hz, VLM 1 photo / few s -> 5 is enough
+    depth_in: /camera/depth/points
+    depth_out: /camera/depth/points_small                  # desktop depth (remapped)
+    depth_rate_hz: 2.0          # Hz; = obstacle_detector rate_hz. Only while someone subscribes
+    depth_max_points: 25000     # points (x,y,z float32 = 0.3 MB) instead of ~300k (4.4 MB, 25/11);
+                                # a QR box at 1 m still gets ~60 points (locator needs 15)
+    depth_max_m: 3.0            # m (camera z); obstacle checks look <= 2.5 m ahead
+    # Rate guard: the robot's own navigation first. Thresholds = odom_preflight.py (25/11).
+    imu_topic: /livox/imu
+    lidar_topic: /fastlio/odometry  # FAST-LIO output rate = lidar health (no /livox/lidar copy)
+    imu_min_hz: 150.0           # Hz; healthy 200. Below: no depth, image at guard_image_hz
+    lidar_min_hz: 8.0           # Hz; healthy 10
+    guard_window_s: 2.0         # s averaging window
+    guard_recover_s: 5.0        # s of healthy rates before full relay again (no flapping)
+    guard_image_hz: 1.0         # Hz colour image while degraded (VLM / QR keep a trickle)

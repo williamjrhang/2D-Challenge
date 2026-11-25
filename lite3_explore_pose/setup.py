@@ -32,6 +32,7 @@ setup(
             'qr_reader = lite3_explore_pose.qr_reader:main',
             'reporter = lite3_explore_pose.reporter:main',
             'obstacle_detector = lite3_explore_pose.obstacle_detector:main',
+            'link_relay = lite3_explore_pose.link_relay:main',
         ],
     },
 )
