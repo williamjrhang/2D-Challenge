@@ -163,3 +163,10 @@ frontier_explorer:
     use_grid_bounds_box: false       # true = frontiers/coverage only inside grid_bounds_cells
                                      # (+0.3 m) even without grid_explore. Spectators seen above
                                      # the 0.54 m walls then no longer create frontiers.
+
+    # ---- Room look waits for the VLM (issue 5) ----
+    room_look_wait_done: true        # each view waits for /perception/look_done (VLM answer)
+    room_look_timeout_s: 15.0        # s; then the next view anyway (scene server ~3-10 s, 30 s
+                                     # timeout in vlm_watcher would stall a room check too long)
+    room_max_relooks: 1              # extra look when the answer was for a photo taken before
+                                     # the look (vlm_watcher was busy with a background ask)

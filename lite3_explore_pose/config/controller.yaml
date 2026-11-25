@@ -10,3 +10,16 @@ mission_controller:
     pose_jump_m: 3.0                 # m per 0.2 s tick
     pose_jump_hard_m: 8.0            # m; above this (20/11: tens of metres) = broken: DONE
     pose_jump_recover_s: 10.0        # s of stable pose before moving again
+
+    # ---- Stop and look (issue 5) ----
+    scene_investigate: true          # scene answer (/perception/room != unknown) in a cell not
+                                     # investigated yet -> INVESTIGATE (robot stops, looks)
+    investigate_settle_s: 1.0        # s standing still before /perception/look (sharp photo)
+    max_relooks: 1                   # one more look if the answered photo predates the look
+    stale_margin_s: 0.3              # s; photo time = look_done - latency_s, compared with the
+                                     # time the look was sent minus this margin
+    look_cell_cooldown_s: 60.0       # s; no second stop-and-look in the same arena cell
+    qr_wait_place: true              # QR look: stay stopped until qr_reader has sent the code
+                                     # (placed, or out of place_attempts); investigate_timeout_s caps it
+    investigate_timeout_s: 20.0      # s; existing default, written here so it is visible: a dead
+                                     # desktop / link never keeps the robot waiting longer

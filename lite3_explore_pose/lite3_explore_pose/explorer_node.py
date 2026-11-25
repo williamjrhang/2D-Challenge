@@ -49,6 +49,7 @@ from lite3_explore_pose.frontiers import (
 import re  # [RECORD]
 
 from lite3_explore_pose.frontier_record import FrontierRecord, record_path
+from lite3_explore_pose.investigate import photo_is_stale
 from lite3_explore_pose.frontier_goals import (
     cell_seen_fraction, frontier_step, target_cell, unknown_side_xy,
 )
@@ -202,6 +203,12 @@ class FrontierExplorer(Node):
         # outside the arena. true = frontiers / coverage limited to the grid_bounds_cells
         # box also without grid_explore. false = old (guard_radius_m box).
         p('use_grid_bounds_box', False)
+        # Issue 5: each room view waits for /perception/look_done (a VLM answer takes
+        # longer than room_dwell_s) before turning to the next view; at most
+        # room_look_timeout_s. A stale answer (photo taken before the look) -> one more look.
+        p('room_look_wait_done', True)
+        p('room_look_timeout_s', 15.0)
+        p('room_max_relooks', 1)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -230,7 +237,8 @@ class FrontierExplorer(Node):
             'cell_visit_edge_margin_m',
             'frontier_enter_cell', 'frontier_seen_done_frac', 'frontier_lead_m',
             'idle_warn_period_s', 'frontier_retry_enabled', 'frontier_retry_delay_s',
-            'wall_seen_frac', 'keep_visited_walls',
+            'wall_seen_frac', 'keep_visited_walls', 'room_look_wait_done',
+            'room_look_timeout_s', 'room_max_relooks',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -314,6 +322,10 @@ class FrontierExplorer(Node):
         # [ROOM] RViz overlay + VLM trigger
         self.cells_pub = self.create_publisher(MarkerArray, '/exploration/cells', 10)
         self.look_pub = self.create_publisher(Bool, '/perception/look', 10)
+        self.look_done_t = None           # [LOOK] issue 5
+        self.scene_latency = None         # (arrival, latency_s) of the latest scene answer
+        self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
+        self.create_subscription(String, '/perception/scene', self.on_scene, 10)
         self.last_cells_pub = 0.0
         # [COVER] RViz: camera coverage grid (latched), pose trail, coverage %
         if self.P['coverage_enabled']:
@@ -416,6 +428,18 @@ class FrontierExplorer(Node):
             self.covering = False  # [COVER] new area may be open: frontiers first again
             self.cover_empty_checks = 0
             self.set_state('SELECT')
+
+    def on_look_done(self, msg):
+        if msg.data:
+            self.look_done_t = self.now_s()
+
+    def on_scene(self, msg):
+        try:
+            latency = json.loads(msg.data).get('latency_s')
+        except (ValueError, AttributeError):
+            return
+        if latency is not None:
+            self.scene_latency = (self.now_s(), float(latency))
 
     def on_gait_current(self, msg):
         self.gait_current = msg.data
@@ -1547,13 +1571,40 @@ class FrontierExplorer(Node):
             self.get_logger().warn(f'ROOM {self.room.cell}: Nav2 refused the turn to {name}')
         self.start_room_dwell()
 
-    def start_room_dwell(self):
+    def start_room_dwell(self, relook=False):
         name, _ = self.room.views[self.room_idx]
         self.room_phase = 'dwell'
         self.room_until = self.now_s() + self.P['room_dwell_s']
+        self.room_look_sent = self.now_s()
+        if not relook:
+            self.room_relooks = 0
         self.publish_cmd()
         self.look_pub.publish(Bool(data=True))       # one VLM photo of this view (booklet J1)
-        self.get_logger().info(f'ROOM {self.room.cell}: looking at {name}')
+        self.get_logger().info(f'ROOM {self.room.cell}: looking at {name}'
+                               + (' (again: last answer was a stale photo)' if relook else ''))
+
+    def room_view_finished(self, now):
+        """[LOOK] dwell over AND (look_done for this look, or timeout)."""
+        if now < self.room_until:
+            return False
+        if not self.P.get('room_look_wait_done', False):
+            return True
+        sent = self.room_look_sent
+        done = self.look_done_t is not None and self.look_done_t >= sent
+        if not done:
+            if now - sent > self.P['room_look_timeout_s']:
+                self.get_logger().warn(f'ROOM {self.room.cell}: no look_done after '
+                                       f'{now - sent:.0f} s, next view')
+                return True
+            return False
+        lat = self.scene_latency
+        latency = lat[1] if lat is not None and lat[0] >= sent else None
+        if (photo_is_stale(sent, self.look_done_t, latency)
+                and getattr(self, 'room_relooks', 0) < self.P['room_max_relooks']):
+            self.room_relooks = getattr(self, 'room_relooks', 0) + 1
+            self.start_room_dwell(relook=True)
+            return False
+        return True
 
     def do_room_look(self, pose):
         if self.room is None:
@@ -1567,7 +1618,7 @@ class FrontierExplorer(Node):
                 self.start_room_dwell()
             return
         self.publish_cmd()
-        if now < self.room_until:
+        if not self.room_view_finished(now):
             return
         st = self.room_status[self.room.cell]
         st['views_done'].append(self.room.views[self.room_idx][0])

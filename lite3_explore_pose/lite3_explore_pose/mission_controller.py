@@ -44,6 +44,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from lite3_explore_pose.investigate import LookCooldown, photo_is_stale
 from lite3_explore_pose.mission_config import Arena, load_mission
 
 # perception event -> which special behaviour to start
@@ -99,13 +100,22 @@ class MissionController(Node):
         # of metres) still stop everything (DONE). pose_jump_recover_s 0 = old: always DONE.
         p('pose_jump_hard_m', 8.0)
         p('pose_jump_recover_s', 10.0)
+        # Issue 5: stop and let scene understanding finish (vlm_watcher unchanged).
+        p('scene_investigate', True)        # /perception/room answer -> INVESTIGATE (new cell)
+        p('investigate_settle_s', 1.0)      # stand still this long before /perception/look
+        p('max_relooks', 1)                 # extra looks when the answered photo was stale
+        p('stale_margin_s', 0.3)
+        p('look_cell_cooldown_s', 60.0)     # no second stop-and-look in the same cell
+        p('qr_wait_place', True)            # QR look: stay until qr_reader sent the code
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'require_localization_ready', 'global_frame', 'tick_hz', 'investigate_timeout_s',
             'traverse_timeout_s', 'exit_timeout_s', 'look_cooldown_s', 'look_every_s',
             'approach_kinds', 'approach_min_sightings', 'approach_merge_m',
             'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s', 'pose_jump_m',
-            'pose_jump_hard_m', 'pose_jump_recover_s']}
+            'pose_jump_hard_m', 'pose_jump_recover_s', 'scene_investigate',
+            'investigate_settle_s', 'max_relooks', 'stale_margin_s', 'look_cell_cooldown_s',
+            'qr_wait_place']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -124,6 +134,10 @@ class MissionController(Node):
             self.create_subscription(Bool, '/exploration/localization_ready',
                                      self.on_localization_ready, 1)
         self.create_subscription(String, '/perception/obstacle_seen', self.on_obstacle_seen, 10)
+        # [LOOK] issue 5: scene answers (vlm_watcher) and QR placements (qr_reader)
+        self.create_subscription(String, '/perception/room', self.on_room, 10)
+        self.create_subscription(String, '/perception/scene', self.on_scene, 10)
+        self.create_subscription(String, '/perception/found', self.on_found, 50)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -170,6 +184,15 @@ class MissionController(Node):
         self.traverse_xy = None
         self.last_xy = None
         self.stable_since = None     # LOCALIZE: ready and jump-free since
+        # [LOOK] issue 5
+        self.looks = LookCooldown(self.P['look_cell_cooldown_s'])
+        self.look_reason = None      # 'scene' | 'qr' | 'person' | 'new_area' | 'scheduled'
+        self.look_cell = None
+        self.look_sent_t = None
+        self.relooks = 0
+        self.last_latency = None     # (arrival time, latency_s) of the latest scene answer
+        self.qr_event_t = None
+        self.last_qr_found_t = None
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
         self.enter('EXPLORE')
@@ -200,9 +223,15 @@ class MissionController(Node):
             self.pending_special = kind
             self.get_logger().info(f'Event: {event} -> will traverse {kind}')
         elif event in LOOK_EVENTS:
-            if self.now_s() - self.last_look_end > self.P['look_cooldown_s']:
-                self.pending_look = True
-                self.get_logger().info(f'Event: {event} -> will investigate')
+            if event == 'qr':
+                self.qr_event_t = self.now_s()
+            cell = self.current_cell()
+            if not self.looks.may_look(cell, self.now_s()):
+                self.get_logger().info(f'Event: {event} in cell {cell}: looked there '
+                                       f'< {self.P["look_cell_cooldown_s"]:.0f} s ago, skipping')
+            elif self.now_s() - self.last_look_end > self.P['look_cooldown_s'] or event == 'qr':
+                self.pending_look = event
+                self.get_logger().info(f'Event: {event} -> will investigate (cell {cell})')
         elif event in IGNORED_EVENTS:
             self.get_logger().warn(f'Event: {event} (no action yet)')
         else:
@@ -210,6 +239,47 @@ class MissionController(Node):
 
     def on_look_done(self, msg):
         self.look_done = msg.data
+        if msg.data:
+            self.look_done_t = self.now_s()
+
+    # ---------------- [LOOK] issue 5 ----------------
+    def current_cell(self):
+        here = self.robot_xy()
+        if here is None:
+            return None
+        return self.arena.cell_index(*self.arena.map_to_arena(*here))
+
+    def on_room(self, msg):
+        """Scene answer (vlm_watcher, already checked against min_confidence)."""
+        scene = msg.data.strip()
+        if (not self.P.get('scene_investigate') or scene in ('', 'unknown')
+                or self.state != 'EXPLORE' or self.pending_look):
+            return
+        cell = self.current_cell()
+        if self.looks.may_scene_look(cell, self.now_s()):
+            self.pending_look = 'scene'
+            self.get_logger().info(f'Scene answer {scene!r} in new cell {cell}: will stop and '
+                                   'investigate')
+
+    def on_scene(self, msg):
+        try:
+            latency = json.loads(msg.data).get('latency_s')
+        except (ValueError, AttributeError):
+            return
+        if latency is not None:
+            self.last_latency = (self.now_s(), float(latency))
+
+    def on_found(self, msg):
+        try:
+            if json.loads(msg.data).get('task_type') == 'qr':
+                self.last_qr_found_t = self.now_s()
+        except (ValueError, AttributeError):
+            pass
+
+    def send_look(self):
+        self.look_done = False
+        self.look_sent_t = self.now_s()
+        self.look_pub.publish(Bool(data=True))
 
     def on_special_done(self, msg):
         self.special_result = msg.data.strip()
@@ -299,7 +369,12 @@ class MissionController(Node):
             self.arrived_at = None
         elif state == 'INVESTIGATE':
             self.look_done = False
-            self.look_pub.publish(Bool(data=True))
+            self.look_sent_t = None                # sent after investigate_settle_s (still)
+            self.relooks = 0
+            self.look_reason = self.look_reason or 'scheduled'
+            self.look_cell = self.current_cell()
+            self.looks.mark(self.look_cell, self.now_s(), scene=self.look_reason == 'scene')
+            self.get_logger().info(f'INVESTIGATE ({self.look_reason}) in cell {self.look_cell}')
         elif state == 'GO_TO_EXIT':
             self.exit_goal_sent = False
         elif state == 'LAUNCH':
@@ -368,6 +443,8 @@ class MissionController(Node):
                 self.enter('TRAVERSE')
                 return
             if self.pending_look and self.state == 'EXPLORE':
+                self.look_reason = (self.pending_look if isinstance(self.pending_look, str)
+                                    else 'event')
                 self.pending_look = False
                 self.enter('INVESTIGATE')
                 return
@@ -407,6 +484,7 @@ class MissionController(Node):
             if (self.P['look_every_s'] > 0
                     and self.now_s() - self.last_look_end > self.P['look_every_s']):
                 self.get_logger().info('Scheduled look-around is due; pausing exploration.')
+                self.look_reason = 'scheduled'
                 self.enter('INVESTIGATE')
             return
         if self.exit_xy is not None or self.explore_done:
@@ -465,15 +543,41 @@ class MissionController(Node):
         self.enter('EXPLORE')
 
     def do_investigate(self):
-        if self.look_done:
+        """Stand still -> look -> (stale photo? look again) -> (QR? until placed) -> EXPLORE.
+        investigate_timeout_s always ends it (desktop / link down never blocks the robot)."""
+        if self.time_in_state() > self.P['investigate_timeout_s']:
+            self.get_logger().warn(f'Investigate ({self.look_reason}) timed out after '
+                                   f'{self.P["investigate_timeout_s"]:.0f} s, carrying on.')
             self.finish_look()
-        elif self.time_in_state() > self.P['investigate_timeout_s']:
-            self.get_logger().warn('Investigate timed out, carrying on.')
-            self.finish_look()
+            return
+        if self.look_sent_t is None:
+            if self.time_in_state() >= self.P.get('investigate_settle_s', 0.0):
+                self.send_look()
+            return
+        if not self.look_done:
+            return
+        lat = self.last_latency
+        latency = lat[1] if lat is not None and lat[0] >= self.look_sent_t else None
+        done_t = getattr(self, 'look_done_t', self.now_s())
+        if (photo_is_stale(self.look_sent_t, done_t, latency, self.P.get('stale_margin_s', 0.3))
+                and self.relooks < self.P.get('max_relooks', 1)):
+            self.relooks += 1
+            self.get_logger().info(f'Look answered with a photo from ~{done_t - latency:.1f} '
+                                   f'(look sent {self.look_sent_t:.1f}): stale, looking again')
+            self.send_look()
+            return
+        if (self.look_reason == 'qr' and self.P.get('qr_wait_place', True)
+                and (self.last_qr_found_t is None or self.qr_event_t is None
+                     or self.last_qr_found_t < self.qr_event_t)):
+            self.get_logger().info('Waiting for qr_reader to place and send the QR code',
+                                   throttle_duration_sec=2.0)
+            return
+        self.finish_look()
 
     def finish_look(self):
         self.last_look_end = self.now_s()
         self.pending_look = False   # drop looks that came in while looking
+        self.look_reason = None
         self.enter('EXPLORE')
 
     def do_traverse(self):
