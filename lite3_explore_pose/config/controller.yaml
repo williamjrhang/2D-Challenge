@@ -1,0 +1,12 @@
+# mission_controller settings (loaded by the launch files; mission_file is set there).
+mission_controller:
+  ros__parameters:
+    # ---- Position jumps (issue 1, 26/11) ----
+    # pose_jump_m: more than this between two 0.2 s ticks = a jump (1.0 fired on a normal
+    # 1.0 m SLAM correction, 20/11). Old behaviour: every jump ended the run (DONE); the
+    # 25/11 logs show 3.0-8.5 m jumps ending 20+ runs. Now jumps up to pose_jump_hard_m
+    # pause the robot in LOCALIZE until localization is ready and jump-free for
+    # pose_jump_recover_s, then exploring continues. pose_jump_recover_s 0 = old (DONE).
+    pose_jump_m: 3.0                 # m per 0.2 s tick
+    pose_jump_hard_m: 8.0            # m; above this (20/11: tens of metres) = broken: DONE
+    pose_jump_recover_s: 10.0        # s of stable pose before moving again

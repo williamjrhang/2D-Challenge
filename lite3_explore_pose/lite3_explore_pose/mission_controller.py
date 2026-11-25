@@ -93,12 +93,19 @@ class MissionController(Node):
         # messy map). SLAM corrections of ~1 m are normal; real breakage jumped 20+ m. More than pose_jump_m between two ticks (0.2 s)
         # = broken tracking -> stop everything. Restart the robot launch. 0 = off.
         p('pose_jump_m', 3.0)                # 1.0 fired on a normal 1.0 m SLAM correction (20/11)
+        # Issue 1: a jump between pose_jump_m and pose_jump_hard_m no longer ends the run.
+        # LOCALIZE: explorer paused, robot still, until localization has been ready and
+        # jump-free for pose_jump_recover_s, then EXPLORE again. Bigger jumps (20/11: tens
+        # of metres) still stop everything (DONE). pose_jump_recover_s 0 = old: always DONE.
+        p('pose_jump_hard_m', 8.0)
+        p('pose_jump_recover_s', 10.0)
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'require_localization_ready', 'global_frame', 'tick_hz', 'investigate_timeout_s',
             'traverse_timeout_s', 'exit_timeout_s', 'look_cooldown_s', 'look_every_s',
             'approach_kinds', 'approach_min_sightings', 'approach_merge_m',
-            'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s', 'pose_jump_m']}
+            'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s', 'pose_jump_m',
+            'pose_jump_hard_m', 'pose_jump_recover_s']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -162,6 +169,7 @@ class MissionController(Node):
         self.arrived_at = None
         self.traverse_xy = None
         self.last_xy = None
+        self.stable_since = None     # LOCALIZE: ready and jump-free since
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
         self.enter('EXPLORE')
@@ -314,12 +322,24 @@ class MissionController(Node):
             if here is not None and self.last_xy is not None:
                 jump = math.hypot(here[0] - self.last_xy[0], here[1] - self.last_xy[1])
                 if jump > self.P['pose_jump_m']:
+                    self.last_xy = here
+                    if self.jump_recoverable(jump):
+                        self.stable_since = None
+                        if self.state != 'LOCALIZE':
+                            self.get_logger().error(
+                                f'Robot position jumped {jump:.1f} m in one tick: pausing in '
+                                f'LOCALIZE until it is stable for '
+                                f'{self.P["pose_jump_recover_s"]:.0f} s.')
+                            self.cancel_nav()
+                            self.enter('LOCALIZE')
+                        return
                     self.stop_for_localization(f'Robot position jumped {jump:.1f} m in one tick')
                     return
             if here is not None:
                 self.last_xy = here
         if self.state != 'DONE' and not ready:
             self.last_xy = None
+            self.stable_since = None             # LOCALIZE: needs a full stable period
             self.pending_special = None
             self.obstacles = [o for o in self.obstacles if o['status'] != 'new']
             if self.state in ('TRAVERSE', 'APPROACH', 'GO_TO_EXIT'):
@@ -353,6 +373,26 @@ class MissionController(Node):
                 return
 
         getattr(self, f'do_{self.state.lower()}')()
+
+    def jump_recoverable(self, jump):
+        return (self.P.get('pose_jump_recover_s', 0) > 0
+                and jump <= self.P.get('pose_jump_hard_m', 0)
+                and self.state in ('EXPLORE', 'INVESTIGATE', 'APPROACH', 'GO_TO_EXIT',
+                                   'LOCALIZE'))
+
+    def do_localize(self):
+        """Robot still (explorer paused, turn_hold zero), until the pose is stable again."""
+        now = self.now_s()
+        if self.stable_since is None:
+            self.stable_since = now
+        left = self.P['pose_jump_recover_s'] - (now - self.stable_since)
+        if left > 0:
+            self.get_logger().warn(f'LOCALIZE: waiting for a stable pose ({left:.1f} s more)',
+                                   throttle_duration_sec=2.0)
+            return
+        self.get_logger().warn('LOCALIZE: pose stable again, back to EXPLORE.')
+        self.last_xy = None
+        self.enter('GO_TO_EXIT' if self.out_of_time else 'EXPLORE')
 
     def do_explore(self):
         target = self.pick_target()

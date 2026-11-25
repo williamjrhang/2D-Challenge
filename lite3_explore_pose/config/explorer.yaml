@@ -128,3 +128,20 @@ frontier_explorer:
                                      # hold instead of blacklisting + recovery (once per goal)
     obstacle_hold_m: 1.5             # detection with 0 < forward_m <= this and |left_m| <= 0.5 (or trigger)
     obstacle_recent_s: 2.0           # ... that arrived within this many seconds
+
+    # ---- ENTER the cell behind a frontier (issue 1, 26/11) ----
+    # The 360 deg lidar maps the room behind a doorway from metres away, so "frontier mapped
+    # -> cancel" turned the robot away before it walked in and the camera never saw the
+    # room's side walls. Now a frontier goal is done only when the robot is INSIDE the cell
+    # the frontier leads into (or the camera saw that cell); a mapped frontier becomes
+    # "go into that cell". false = old behaviour (cancel as soon as it is mapped).
+    frontier_enter_cell: true
+    frontier_seen_done_frac: 0.9     # share (0-1) of the target cell's free floor the camera saw
+                                     # = done without driving in (0.9: a whole room look, not a glance)
+    frontier_lead_m: 0.5             # m past the frontier = the cell it leads into (half a 1.02 m cell)
+    # Position-jump latch (pose_health.py). 25/11 one FAST-LIO hiccup ('odom -> base_link
+    # jumped 1.30 m in 0.70 s') latched forever and the explorer sat in WAIT_POSE. Now it
+    # clears after pose_jump_recover_s seconds of stable, jump-free TF. 0 = old permanent latch.
+    pose_jump_recover_s: 10.0        # s; > slam_toolbox map_update_interval (2 s) x a few updates
+    pose_jump_hard_m: 5.0            # m; bigger jumps (20/11: tens of metres) never clear: restart
+    idle_warn_period_s: 5.0          # s between "Explorer not moving: state=..., reason: ..." WARNs

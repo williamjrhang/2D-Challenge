@@ -52,6 +52,9 @@ from lite3_explore_pose.gait import GAIT_COMMAND_QOS, send_gait
 from lite3_explore_pose.frontiers import (
     MapInfo, find_frontiers, score_frontiers, still_frontier,
 )
+from lite3_explore_pose.frontier_goals import (
+    cell_seen_fraction, frontier_step, target_cell, unknown_side_xy,
+)
 # [COVER] camera coverage (pose history -> seen mask -> COVER goals)
 from lite3_explore_pose.coverage import (
     PoseHistory, SeenTracker, bounds_mask, coverage_fraction, default_coverage_path,
@@ -163,6 +166,17 @@ class FrontierExplorer(Node):
         p('grid_bounds_cells', [0, -2, 5, 2])
         p('grid_max_attempts', 2)
         p('cell_visit_edge_margin_m', 0.10)
+        # [ENTER] issue 1: a frontier goal is done only when the robot entered the cell the
+        # frontier leads into (or the camera saw it). A frontier mapped from afar becomes a
+        # 'go into that cell' goal instead of being cancelled. False = old cancel-on-mapped.
+        p('frontier_enter_cell', True)
+        p('frontier_seen_done_frac', 0.9)   # camera saw this share of the target cell = done
+        p('frontier_lead_m', 0.5)           # target = cell this far past the frontier
+        # Position-jump latch (pose_health.py): clears after this many s of stable TF.
+        # 0 = old permanent latch. Jumps over pose_jump_hard_m never clear.
+        p('pose_jump_recover_s', 10.0)
+        p('pose_jump_hard_m', 5.0)
+        p('idle_warn_period_s', 5.0)        # throttled WARN 'not moving: state, reason'
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -189,6 +203,8 @@ class FrontierExplorer(Node):
             'room_check', 'room_check_radius_m', 'room_dwell_s', 'room_max_attempts',
             'cell_overlay', 'grid_explore', 'grid_bounds_cells', 'grid_max_attempts',
             'cell_visit_edge_margin_m',
+            'frontier_enter_cell', 'frontier_seen_done_frac', 'frontier_lead_m',
+            'idle_warn_period_s',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -274,7 +290,8 @@ class FrontierExplorer(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.pose_health = PoseHealth(
             self.tf_buffer, g('global_frame'), g('odom_frame'), g('robot_frame'),
-            g('pose_max_age_s'), g('slam_max_age_s'), g('pose_settle_s'))
+            g('pose_max_age_s'), g('slam_max_age_s'), g('pose_settle_s'),
+            jump_recover_s=g('pose_jump_recover_s'), hard_jump_m=g('pose_jump_hard_m'))
         self.pose_problem = None
 
         # Nav2 Simple Commander (its own node, used like in the labs)
@@ -317,6 +334,8 @@ class FrontierExplorer(Node):
         self.goal_cells_xy = []           # coverage goal: world xy of its unseen cells
         self.goal_dwell_done = False      # arrival HOLD already done for this goal
         self.goal_hold_used = False       # obstacle HOLD already used for this goal
+        self.goal_target_cell = None      # [ENTER] cell a frontier goal leads into
+        self.goal_converted = False       # [ENTER] frontier mapped -> now 'enter that cell'
         self.hold_end = None
         self.hold_then = None             # ('navigate',) or ('recover', why)
         self.last_obstacle = None         # (time, kind, forward_m)
@@ -398,6 +417,9 @@ class FrontierExplorer(Node):
         """Return the robot pose only while localization is ready."""
         previous_problem = self.pose_problem
         t, self.pose_problem = self.pose_health.sample(self.now_s())
+        if getattr(self.pose_health, 'recovered', None):
+            self.get_logger().warn(self.pose_health.recovered)
+            self.pose_health.recovered = None
         if t is None:
             if self.pose_health.jump is not None and self.pose_problem != previous_problem:
                 self.get_logger().error(self.pose_problem)
@@ -425,7 +447,8 @@ class FrontierExplorer(Node):
             self.get_logger().warn(
                 f'Blacklisted ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f}): {why}')
 
-    def send_goal(self, xy, robot_xy, is_frontier=True, kind=None, yaw=None, retry=False):
+    def send_goal(self, xy, robot_xy, is_frontier=True, kind=None, yaw=None, retry=False,
+                  target=None, converted=False):
         if yaw is None:  # [ROOM] room goals face into the room
             yaw = math.atan2(xy[1] - robot_xy[1], xy[0] - robot_xy[0])
         goal = PoseStamped()
@@ -447,6 +470,8 @@ class FrontierExplorer(Node):
         self.goal_kind = kind or ('frontier' if is_frontier else 'return')
         self.goal_dwell_done = False
         self.goal_hold_used = False
+        self.goal_target_cell = target      # [ENTER]
+        self.goal_converted = converted
         distance = math.hypot(xy[0] - robot_xy[0], xy[1] - robot_xy[1])
         self.goal_time_limit = self.P['time_limit_base_s'] + self.P['time_limit_per_m_s'] * distance
 
@@ -514,8 +539,8 @@ class FrontierExplorer(Node):
             self.set_state('SELECT')
             return
         self.pose_retry_pending = False
-        if self.goal_is_frontier and not still_frontier(
-                self.grid, self.info, self.goal_xy, radius_m=0.4, free_max=self.P['free_max']):
+        if (self.goal_is_frontier and not self.enter_mode() and not still_frontier(
+                self.grid, self.info, self.goal_xy, radius_m=0.4, free_max=self.P['free_max'])):
             self.set_state('SELECT')
             return
         if self.goal_kind == 'coverage' and (
@@ -524,7 +549,8 @@ class FrontierExplorer(Node):
             return
         self.get_logger().info(f'Localization recovered; retrying goal {self.goal_xy} once.')
         accepted = self.send_goal(self.goal_xy, pose[:2], self.goal_is_frontier,
-                                  self.goal_kind, self.goal_yaw, retry=True)
+                                  self.goal_kind, self.goal_yaw, retry=True,
+                                  **(self.enter_kwargs() if self.goal_is_frontier else {}))
         self.set_state('NAVIGATE' if accepted else 'SELECT')
 
     def publish_markers(self, ranked):
@@ -746,6 +772,7 @@ class FrontierExplorer(Node):
                 self.publish_cmd()
             if self.state != 'DONE':
                 self.set_state('PAUSED')
+            self.warn_idle('paused by mission_controller (/exploration/enable = false)')
             return
         if self.state == 'PAUSED':
             self.set_state('SELECT')
@@ -784,10 +811,14 @@ class FrontierExplorer(Node):
         self.start_exploring()
 
     def log_missing_inputs(self, pose):
-        self.get_logger().info(
-            f'{self.state}: waiting for exploration inputs '
-            f'(map={"missing" if self.grid is None else "ready"}, '
-            f'pose={self.pose_problem if pose is None else "ready"})', throttle_duration_sec=5.0)
+        self.warn_idle(f'waiting for exploration inputs '
+                       f'(map={"missing" if self.grid is None else "ready"}, '
+                       f'pose={self.pose_problem if pose is None else "ready"})')
+
+    def warn_idle(self, reason):
+        """Issue 1: always say WHY the explorer is not moving (throttled WARN)."""
+        self.get_logger().warn(f'Explorer not moving: state={self.state}, reason: {reason}',
+                               throttle_duration_sec=self.P.get('idle_warn_period_s', 5.0))
 
     def send_gait(self):
         send_gait(self.gait_pub, MotionSimpleCMD, self.P['gait_code'], self.get_logger(),
@@ -906,8 +937,14 @@ class FrontierExplorer(Node):
             return  # only visualise
 
         best = ranked[0]
-        self.get_logger().info(f'Selected highest-scoring frontier ({counts}), best first: {top}')
-        if self.send_goal(best.goal_xy, pose[:2], is_frontier=True):
+        target = None
+        if self.enter_mode():                                  # [ENTER]
+            target = target_cell(self.cells.cell_of, best.goal_xy, pose[:2],
+                                 unknown_side_xy(self.grid, self.info, best.cells),
+                                 lead_m=self.P['frontier_lead_m'])
+        self.get_logger().info(f'Selected highest-scoring frontier ({counts}), best first: {top}'
+                               + (f'; leads into cell {target}' if target is not None else ''))
+        if self.send_goal(best.goal_xy, pose[:2], is_frontier=True, target=target):
             self.set_state('NAVIGATE')
 
     def do_navigate(self, pose):
@@ -949,6 +986,10 @@ class FrontierExplorer(Node):
                 self.start_room_look(pose)
                 return
             if result == TaskResult.SUCCEEDED:
+                # [ENTER] reached the frontier but not inside the cell it leads into: go in
+                if (self.goal_is_frontier and self.enter_mode() and not self.goal_converted
+                        and self.frontier_check(pose, still=False) == 'convert'):
+                    return
                 # [HOLD] arrival dwell first; this branch runs again (unchanged) after it
                 if self.start_arrival_hold():
                     return
@@ -958,6 +999,8 @@ class FrontierExplorer(Node):
                 # Don't come straight back if this spot is still a frontier (e.g. glass).
                 if self.goal_is_frontier:
                     self.blacklist.append(self.goal_xy)
+                    if self.goal_target_cell is not None and self.visit_cell(pose) is not None:
+                        self.record_visit(self.visit_cell(pose))
                 # [COVER] reached coverage goals are blacklisted too
                 if self.goal_kind == 'coverage':
                     self.blacklist.append(self.goal_xy)
@@ -1014,10 +1057,20 @@ class FrontierExplorer(Node):
                 self.window_remaining = remaining
                 self.window_start = now
 
-        # 4. Goal already explored on the way? Then pick a new one (no blacklist).
+        # 4. Goal already explored on the way?
+        #    [ENTER] (default): never cancel because it got mapped; finish only inside the
+        #    target cell, else turn the goal into 'enter that cell'.
+        #    Old behaviour (frontier_enter_cell false): pick a new one (no blacklist).
         if self.goal_is_frontier and now - self.last_recheck > self.P['recheck_period_s']:
             self.last_recheck = now
-            if self.grid is not None and not still_frontier(
+            if self.grid is None:
+                pass
+            elif self.enter_mode():
+                if self.frontier_check(pose) == 'done':
+                    self.nav.cancelTask()
+                    self.finish_frontier(pose)
+                    return
+            elif not still_frontier(
                     self.grid, self.info, self.goal_xy, radius_m=0.4,
                     free_max=self.P['free_max']):
                 self.get_logger().info('Goal area already mapped, choosing a new frontier.')
@@ -1034,6 +1087,58 @@ class FrontierExplorer(Node):
                     f'Coverage goal area already seen ({unseen} cells left), choosing a new goal.')
                 self.nav.cancelTask()
                 self.set_state('SELECT')
+
+    # ================= [ENTER] frontier -> enter the cell behind it =================
+
+    def enter_mode(self):
+        return bool(self.P.get('frontier_enter_cell')) and getattr(self, 'cells', None) is not None
+
+    def enter_kwargs(self):
+        return {'target': getattr(self, 'goal_target_cell', None),
+                'converted': getattr(self, 'goal_converted', False)}
+
+    def target_seen_frac(self):
+        target = getattr(self, 'goal_target_cell', None)
+        if target is None or not self.P.get('coverage_enabled'):
+            return None
+        half = self.cells.size / 2.0 - self.P['cell_visit_edge_margin_m']
+        return cell_seen_fraction(self.current_seen(), self.grid, self.info,
+                                  self.cells.centre(target), half, self.P['free_max'])
+
+    def frontier_check(self, pose, still=None):
+        """Recheck a running frontier goal: 'done', 'convert' (goal re-sent) or 'continue'."""
+        target = self.goal_target_cell
+        if still is None:
+            still = still_frontier(self.grid, self.info, self.goal_xy, radius_m=0.4,
+                                   free_max=self.P['free_max'])
+        here = self.visit_cell(pose) if pose is not None else None
+        step = frontier_step(still, here, target, self.target_seen_frac(),
+                             self.P['frontier_seen_done_frac'], self.goal_converted)
+        if step == 'convert':
+            ci = self.cell_info.get(target) if getattr(self, 'cell_info', None) else None
+            xy = ci.goal if ci is not None and ci.goal is not None else self.cells.centre(target)
+            self.get_logger().info(
+                f'Frontier ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f}) '
+                f'{"mapped before arrival" if not still else "reached at the edge"}: '
+                f'not cancelling, going INTO cell {target} at ({xy[0]:.2f}, {xy[1]:.2f}).')
+            if not self.send_goal(xy, pose[:2], is_frontier=True, kind='frontier',
+                                  target=target, converted=True):
+                self.set_state('SELECT')
+            else:
+                self.set_state('NAVIGATE')
+        return step
+
+    def finish_frontier(self, pose):
+        target = self.goal_target_cell
+        here = self.visit_cell(pose) if pose is not None else None
+        why = 'entered' if here == target else 'camera already saw it'
+        self.get_logger().info(f'Frontier done: cell {target} {why}.')
+        if here is not None:
+            self.record_visit(here)
+        self.blacklist.append(self.goal_xy)
+        self.failures_in_a_row = 0
+        self.last_good_xy = self.goal_xy
+        self.set_state('SELECT')
 
     def start_recovery(self, why):
         if self.goal_kind == 'room' and self.room is not None:  # [ROOM]
@@ -1065,7 +1170,7 @@ class FrontierExplorer(Node):
         self.set_state('SELECT')
 
     def do_done(self, pose):
-        pass
+        self.warn_idle('exploration DONE (resume with /exploration/enable true)')
 
     def do_paused(self, pose):
         pass

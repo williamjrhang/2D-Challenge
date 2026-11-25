@@ -111,6 +111,7 @@ def generate_launch_description():
                                             "' == 'true'"])}]),
         'special_obstacles': node('special_obstacles', [os.path.join(cfg, 'special.yaml')]),
         'mission_controller': node('mission_controller', [
+            os.path.join(cfg, 'controller.yaml'),
             {'mission_file': mission, 'require_localization_ready': True}],
             IfCondition(live)),
     }
