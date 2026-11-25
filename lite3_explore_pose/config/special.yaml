@@ -77,3 +77,18 @@ special_obstacles:
     terrain_clear_s: 1.0
     terrain_clear_extra_m: 0.7
     terrain_max_factor: 1.6         # never walk more than this x the fixed distance
+
+    # ---- Rubble / potholes finish + VERIFY (issue 8) ----
+    # 22-25/11: crossings finished by time while odometry showed the robot stuck, and the
+    # detector saw flat floor past the rubble while the back legs were still on it.
+    odom_max_speed: 0.6              # m/s; odometry growing faster = a jump (25/11: 11 m in 10 s)
+                                     # -> dropped, crossing continues by time
+    verify_enabled: true             # after switching back to flat, walk slowly and check
+    verify_settle_s: 1.0             # s standing still while the flat gait engages
+    verify_s: 3.0                    # s walking at verify_speed
+    verify_speed: 0.08               # m/s; 3 s x 0.08 = 0.24 m expected
+    verify_min_progress_m: 0.10      # m odometry in verify_s; less = stuck (still on the rubble)
+    verify_tilt_deg: 6.0             # deg pitch/roll during VERIFY; more = still on uneven ground
+                                     # (flat floor while walking: < 3 deg)
+    verify_extra_m: 0.5              # m to CROSS again in the previous terrain gait after a revert
+    verify_max_retries: 2            # reverts, then report 'failed'

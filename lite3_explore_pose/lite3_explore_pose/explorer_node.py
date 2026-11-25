@@ -210,6 +210,12 @@ class FrontierExplorer(Node):
         p('room_look_wait_done', True)
         p('room_look_timeout_s', 15.0)
         p('room_max_relooks', 1)
+        # Issue 8: no backing up in the flat gait right after a terrain crossing (it backed
+        # onto the rubble). For this long after /special/report: the explorer's own RECOVER
+        # back-up is skipped and Nav2 goals use config/bt/*_no_backup.xml (Humble's default
+        # tree without BackUp; Nav2's own config is unchanged). '' bt dir = installed one.
+        p('no_backup_after_crossing_s', 30.0)
+        p('no_backup_bt_dir', '')
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -239,7 +245,8 @@ class FrontierExplorer(Node):
             'frontier_enter_cell', 'frontier_seen_done_frac', 'frontier_lead_m',
             'idle_warn_period_s', 'frontier_retry_enabled', 'frontier_retry_delay_s',
             'wall_seen_frac', 'keep_visited_walls', 'room_look_wait_done',
-            'room_look_timeout_s', 'room_max_relooks',
+            'room_look_timeout_s', 'room_max_relooks', 'no_backup_after_crossing_s',
+            'no_backup_bt_dir',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -327,6 +334,8 @@ class FrontierExplorer(Node):
         self.scene_latency = None         # (arrival, latency_s) of the latest scene answer
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/perception/scene', self.on_scene, 10)
+        self.last_crossing_end = None     # [NOBACKUP] issue 8
+        self.create_subscription(String, '/special/report', self.on_special_report, 10)
         # [PORTAL] issue 7: a crossed curtain (mission_controller) re-opens the far side
         self.create_subscription(String, '/exploration/portal_crossed', self.on_portal, map_qos)
         self.last_cells_pub = 0.0
@@ -431,6 +440,37 @@ class FrontierExplorer(Node):
             self.covering = False  # [COVER] new area may be open: frontiers first again
             self.cover_empty_checks = 0
             self.set_state('SELECT')
+
+    def on_special_report(self, msg):
+        try:
+            kind = json.loads(msg.data).get('kind')
+        except (ValueError, AttributeError):
+            return
+        self.last_crossing_end = self.now_s()
+        self.get_logger().info(f'{kind} crossing ended: no back-up for '
+                               f'{self.P["no_backup_after_crossing_s"]:.0f} s')
+
+    def just_crossed(self):
+        t = getattr(self, 'last_crossing_end', None)
+        return t is not None and self.now_s() - t < self.P.get('no_backup_after_crossing_s', 0)
+
+    def bt_file(self, name):
+        """No-BackUp behaviour tree right after a crossing, else '' (Nav2 default)."""
+        if not self.just_crossed():
+            return ''
+        d = self.P.get('no_backup_bt_dir') or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'bt')
+        if not self.P.get('no_backup_bt_dir'):
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                d = os.path.join(get_package_share_directory('lite3_explore_pose'), 'config', 'bt')
+            except Exception:  # noqa: BLE001
+                pass
+        path = os.path.join(d, f'{name}_no_backup.xml')
+        if not os.path.exists(path):
+            self.get_logger().error(f'{path} missing: Nav2 default tree (with BackUp) used')
+            return ''
+        return path
 
     def on_portal(self, msg):
         try:
@@ -583,7 +623,10 @@ class FrontierExplorer(Node):
 
         # Humble's commander retains feedback across actions until new feedback arrives.
         self.nav.feedback = None
-        accepted = self.nav.goToPose(goal)
+        bt = self.bt_file('navigate_to_pose')       # [NOBACKUP] issue 8
+        if bt:
+            self.get_logger().info(f'Goal right after a crossing: Nav2 tree without BackUp ({bt})')
+        accepted = self.nav.goToPose(goal, behavior_tree=bt) if bt else self.nav.goToPose(goal)
         if accepted is False:
             if retry:
                 self.defer_pose_goal('Nav2 rejected the localization retry')
@@ -1345,7 +1388,12 @@ class FrontierExplorer(Node):
             return
         self.blacklist_goal(why)
         self.failures_in_a_row += 1
-        self.state_end = self.now_s() + self.P['backup_time_s']
+        backup = self.P['backup_time_s']
+        if backup > 0 and self.just_crossed():           # [NOBACKUP] issue 8
+            self.get_logger().warn('Recovery right after a terrain crossing: NO back-up '
+                                   '(flat gait would reverse onto the rubble)')
+            backup = 0.0
+        self.state_end = self.now_s() + backup
         self.get_logger().warn(f'Recovery after {why}; consecutive failures={self.failures_in_a_row}, '
                                f'backup time={self.P["backup_time_s"]:.1f} s')
         self.set_state('RECOVER')

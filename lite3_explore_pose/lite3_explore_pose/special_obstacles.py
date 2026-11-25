@@ -25,7 +25,8 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
 import json
 import math
 
-from lite3_explore_pose.crossing import gait_after, stairs_exit
+from lite3_explore_pose.crossing import (gait_after, odom_jumped, stairs_exit, verify_result,
+                                         walked_enough)
 from lite3_explore_pose.gait import (GAIT_COMMAND_QOS, GAIT_NAMES, GaitState, GaitTable,
                                      default_gait_file, send_gait)
 
@@ -171,6 +172,21 @@ class SpecialObstacles(Node):
         p('terrain_clear_s', 1.0)
         p('terrain_clear_extra_m', 0.7)
         p('terrain_max_factor', 1.6)
+        # Issue 8: rubble / potholes. With fresh odometry a crossing never finishes on time
+        # alone, and the walk must cover start distance + terrain length + tail. Odometry
+        # that grows faster than odom_max_speed (25/11: 11 m in 10 s) is dropped -> time mode.
+        p('odom_max_speed', 0.6)
+        # VERIFY after switching back to flat: walk slowly verify_s; too little odometry
+        # progress or still pitching / rolling -> back to the previous terrain gait and CROSS
+        # verify_extra_m more. At most verify_max_retries, then 'failed'.
+        p('verify_enabled', True)
+        p('verify_settle_s', 1.0)
+        p('verify_s', 3.0)
+        p('verify_speed', 0.08)
+        p('verify_min_progress_m', 0.10)
+        p('verify_tilt_deg', 6.0)
+        p('verify_extra_m', 0.5)
+        p('verify_max_retries', 2)
 
         self.P = {name: self.get_parameter(name).value for name in names}
         path = self.P['gait_file'] or default_gait_file()
@@ -203,6 +219,10 @@ class SpecialObstacles(Node):
                                      lambda m, t=topic: self.on_odom(m, t), 10)
         self.cmd_pub = self.create_publisher(Twist, self.P['cmd_vel_topic'], 10)
         self.done_pub = self.create_publisher(String, '/special/done', 10)
+        # Issue 8: details of the last crossing for mission_controller / explorer
+        # {kind, result, verify_reverts, t}
+        self.report_pub = self.create_publisher(String, '/special/report', 10)
+        self.verify_reverts = 0
         self.state_pub = self.create_publisher(String, '/special/state', 10)
         self.gait_pub = None
         if MotionSimpleCMD is not None:
@@ -282,6 +302,8 @@ class SpecialObstacles(Node):
             self.get_logger().info(f'Using odometry {self.odom_src}')
         self.kind = cmd
         self.tilt_since = None
+        self.verify_reverts = 0                       # issue 8
+        self.odo_prev = None
         self.wall_free_m = 0.0               # wall stop only after walking this far
         self.start_dist = 0.0                # measured distance to the terrain at the start
         if cmd != 'stairs':
@@ -438,13 +460,29 @@ class SpecialObstacles(Node):
 
     def walked_enough_for(self, target):
         """Odometry can jump (live test: 6 of 8 curtain crossings 'finished' in < 0.5 s).
-        Done only if odometry says so AND speed x time agrees (>= 70 %), or if
-        speed x time alone reaches 130 % (odometry lagging / missing)."""
+        Done only if odometry says so AND speed x time agrees (>= 70 %). Issue 8: with fresh
+        odometry NEVER by time alone (22-25/11 'finished' while odometry showed it stuck on
+        the rubble). No odometry: speed x time >= 130 %."""
         timed = self.dr_dist
         if self.xy is None or self.start_xy is None:
             return timed >= target
         odo = math.hypot(self.xy[0] - self.start_xy[0], self.xy[1] - self.start_xy[1])
-        return (odo >= target and timed >= 0.7 * target) or timed >= 1.3 * target
+        return walked_enough(odo, timed, target, odom_fresh=True)
+
+    def check_odom_jump(self, now):
+        """Odometry distance growing faster than the robot walks = a jump: time mode."""
+        if self.xy is None or self.start_xy is None:
+            return
+        d = self.travelled()
+        prev = getattr(self, 'odo_prev', None)
+        self.odo_prev = (now, d)
+        if prev is not None and odom_jumped(prev[1], d, now - prev[0], self.P['odom_max_speed']):
+            self.get_logger().error(
+                f'{self.kind}: odometry {self.odom_src} jumped {d - prev[1]:.2f} m in '
+                f'{now - prev[0]:.2f} s: ignoring it, walking by TIME for this crossing')
+            self.dr_dist = max(self.dr_dist, prev[1])   # keep the plausible part
+            self.odom_src = None
+            self.xy = None
 
     def travelled(self):
         if self.xy is None or self.start_xy is None:
@@ -503,8 +541,71 @@ class SpecialObstacles(Node):
             self.restore_sent = self.restore_auto_sent = False
             self.set_phase('RESTORE')
             return
+        if (result == 'success' and self.kind in ('rubble', 'potholes')
+                and self.P['verify_enabled'] and self.gait_code_for(self.kind)):
+            self.start_verify()
+            return
         self.restore_gait()
         self.report(result)
+
+    # ================= issue 8: VERIFY after switching back to flat =================
+
+    def start_verify(self):
+        self.verify_prev_gait = self.gaits.for_terrain(self.kind)   # remember, not hard-coded
+        self.set_gait('flat', f'{self.kind}: crossing done, VERIFY in flat gait')
+        self.verify_start_xy = None
+        self.verify_max_tilt = 0.0
+        self.verify_walk_t = None
+        self.set_phase('VERIFY')
+
+    def do_verify(self):
+        now, t = self.now_s(), self.in_phase_s()
+        if t < self.P['verify_settle_s']:
+            self.stop_robot()                         # let the gait switch happen
+            return
+        self.update_pose()
+        if self.verify_walk_t is None:
+            self.verify_walk_t = now
+            self.verify_start_xy = self.xy
+        self.drive(self.P['verify_speed'])
+        self.verify_max_tilt = max(self.verify_max_tilt, abs(math.degrees(self.roll)),
+                                   abs(math.degrees(self.pitch)))
+        if (now - self.verify_walk_t < self.P['verify_s']
+                and self.verify_max_tilt <= self.P['max_tilt_deg']):
+            return                                    # big tilt: stop and judge at once
+        self.stop_robot()
+        progress = None
+        if self.xy is not None and self.verify_start_xy is not None:
+            progress = math.hypot(self.xy[0] - self.verify_start_xy[0],
+                                  self.xy[1] - self.verify_start_xy[1])
+        need = self.P['verify_min_progress_m'] if progress is not None else -1.0
+        res = verify_result(progress if progress is not None else 0.0, need,
+                            self.verify_max_tilt, self.P['verify_tilt_deg'])
+        msg = (f'{self.kind}: VERIFY {res} (progress '
+               f'{"n/a" if progress is None else f"{progress:.2f} m"}, max tilt '
+               f'{self.verify_max_tilt:.1f} deg)')
+        if res == 'ok':
+            self.get_logger().info(msg)
+            self.report('success')
+            return
+        if self.verify_reverts >= self.P['verify_max_retries']:
+            self.get_logger().error(msg + f': still on the {self.kind} after '
+                                    f'{self.verify_reverts} retries -> failed')
+            self.report('failed')
+            return
+        self.verify_reverts += 1
+        self.get_logger().warn(msg + f': back to {self.verify_prev_gait}, CROSS '
+                               f'{self.P["verify_extra_m"]:.2f} m more '
+                               f'(retry {self.verify_reverts}/{self.P["verify_max_retries"]})')
+        self.set_gait(self.verify_prev_gait, f'{self.kind}: VERIFY failed ({res})')
+        self.walk_m = self.P['verify_extra_m']
+        self.min_walk_m = self.start_dist = self.wall_free_m = 0.0
+        self.start_time = now
+        src = self.fresh_odom()
+        self.odom_src = src[0] if src else None
+        self.odo_prev = None
+        self.gait_resent = False
+        self.set_phase('GAIT')
 
     def do_restore(self):
         """After Exit AI: wait -> AUTO -> wait -> gait for the terrain ahead -> report."""
@@ -531,7 +632,12 @@ class SpecialObstacles(Node):
                 self.report(self.pending_result)
 
     def report(self, result):
-        self.get_logger().info(f'{self.kind}: {result}')
+        self.get_logger().info(f'{self.kind}: {result}'
+                               + (f' ({self.verify_reverts} VERIFY reverts)'
+                                  if getattr(self, 'verify_reverts', 0) else ''))
+        self.report_pub.publish(String(data=json.dumps(
+            {'kind': self.kind, 'result': result,
+             'verify_reverts': getattr(self, 'verify_reverts', 0), 't': self.now_s()})))
         self.done_pub.publish(String(data=result))
         self.set_phase('IDLE')
 
@@ -663,6 +769,8 @@ class SpecialObstacles(Node):
         # Walk straight: steer back to the starting heading
         self.update_pose()
         now = self.now_s()
+        if self.kind != 'stairs':
+            self.check_odom_jump(now)                   # issue 8
         speed = self.P[f'{self.kind}_speed']
         if self.kind == 'stairs':
             speed = self.stairs_push(now, speed)
@@ -765,6 +873,13 @@ class SpecialObstacles(Node):
             self.get_logger().info(f'{self.kind}: floor ahead clear at {walked:.2f} m, '
                                    f'walking {self.P["terrain_clear_extra_m"]:.1f} m off it')
         if walked - self.clear_from >= self.P['terrain_clear_extra_m']:
+            # Issue 8: the detector sees flat floor PAST the rubble while the back legs are
+            # still on it: also need start distance + length + tail (walk_m).
+            if not dist(self.walk_m):
+                self.get_logger().info(f'{self.kind}: floor clear but only {walked:.2f} of '
+                                       f'{self.walk_m:.2f} m walked: keep going',
+                                       throttle_duration_sec=2.0)
+                return
             self.get_logger().info(f'{self.kind}: off the terrain after {walked:.2f} m')
             self.finish('success')
 

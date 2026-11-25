@@ -39,3 +39,7 @@ mission_controller:
     # No Nav2 / costmap change (see README: costmap option needs your OK).
     portal_return: true              # this side done -> approach the curtain again and cross back
     portal_max_crossings: 3          # in + out + one more at most
+
+    # ---- After a crossing (issue 8) ----
+    same_kind_ignore_s: 10.0         # s; the same obstacle kind is ignored right after a crossing,
+                                     # EXCEPT when that crossing needed a VERIFY revert

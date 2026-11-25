@@ -170,3 +170,8 @@ frontier_explorer:
                                      # timeout in vlm_watcher would stall a room check too long)
     room_max_relooks: 1              # extra look when the answer was for a photo taken before
                                      # the look (vlm_watcher was busy with a background ask)
+
+    # ---- No back-up right after a crossing (issue 8) ----
+    no_backup_after_crossing_s: 30.0 # s after /special/report: no RECOVER back-up, and Nav2 goals use
+                                     # config/bt/*_no_backup.xml (default tree minus BackUp 0.30 m)
+    no_backup_bt_dir: ""             # "" = installed share/lite3_explore_pose/config/bt

@@ -114,6 +114,10 @@ class MissionController(Node):
         p('curtain_standoff_m', 0.5)        # stand this far before it, square to the doorway
         p('portal_return', True)            # explored everything on this side -> cross back
         p('portal_max_crossings', 3)
+        # Issue 8: after a crossing the same kind is ignored this long (the detector keeps
+        # seeing the obstacle behind us). NOT after a crossing whose VERIFY had to revert to
+        # the terrain gait: the robot may still be on / at the rubble.
+        p('same_kind_ignore_s', 10.0)
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'require_localization_ready', 'global_frame', 'tick_hz', 'investigate_timeout_s',
@@ -123,7 +127,7 @@ class MissionController(Node):
             'pose_jump_hard_m', 'pose_jump_recover_s', 'scene_investigate',
             'investigate_settle_s', 'max_relooks', 'stale_margin_s', 'look_cell_cooldown_s',
             'qr_wait_place', 'curtain_min_sightings', 'curtain_standoff_m', 'portal_return',
-            'portal_max_crossings']}
+            'portal_max_crossings', 'same_kind_ignore_s']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -134,6 +138,8 @@ class MissionController(Node):
         self.create_subscription(String, '/perception/event', self.on_event, 10)
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/special/done', self.on_special_done, 10)
+        self.last_special_reverted = False
+        self.create_subscription(String, '/special/report', self.on_special_report, 10)
         self.create_subscription(Bool, '/exploration/done', self.on_explore_done, 10)
         self.create_subscription(Bool, '/mission/tasks_done', self.on_tasks_done, 10)
         self.create_subscription(PointStamped, '/mission/exit_pose', self.on_exit_pose, 10)
@@ -234,7 +240,13 @@ class MissionController(Node):
             # just after a crossing, the SAME kind only (else it would cross it again). A
             # different terrain right behind it is crossed in its own gait.
             kind = SPECIAL_EVENTS[event]
-            recent = self.now_s() - self.last_special_end < 10.0
+            recent = (self.now_s() - self.last_special_end
+                      < self.P.get('same_kind_ignore_s', 10.0))
+            if recent and kind == self.last_special_kind and getattr(
+                    self, 'last_special_reverted', False):
+                self.get_logger().warn(f'Event: {event} right after a {kind} crossing that '
+                                       'needed a VERIFY revert: NOT ignored')
+                recent = False
             if self.state == 'TRAVERSE' or (recent and kind == self.last_special_kind):
                 return
             self.pending_special = kind
@@ -317,6 +329,12 @@ class MissionController(Node):
 
     def on_special_done(self, msg):
         self.special_result = msg.data.strip()
+
+    def on_special_report(self, msg):
+        try:
+            self.last_special_reverted = int(json.loads(msg.data).get('verify_reverts', 0)) > 0
+        except (ValueError, TypeError, AttributeError):
+            pass
 
     def on_explore_done(self, msg):
         self.explore_done = msg.data
