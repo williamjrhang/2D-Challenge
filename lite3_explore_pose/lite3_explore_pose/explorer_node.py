@@ -49,6 +49,7 @@ from lite3_explore_pose.frontiers import (
 import re  # [RECORD]
 
 from lite3_explore_pose.frontier_record import FrontierRecord, record_path
+from lite3_explore_pose.cell_route import bfs, grid_alignment, needs_centring, route_poses
 from lite3_explore_pose.crossing import far_side
 from lite3_explore_pose.investigate import photo_is_stale
 from lite3_explore_pose.frontier_goals import (
@@ -216,6 +217,21 @@ class FrontierExplorer(Node):
         # tree without BackUp; Nav2's own config is unchanged). '' bt dir = installed one.
         p('no_backup_after_crossing_s', 30.0)
         p('no_backup_bt_dir', '')
+        # Issue 10: route cell, frontier, room and coverage goals through cell centres and
+        # doorway midpoints (BFS over the open sides of CellGrid.analyze cells, Nav2
+        # navigateThroughPoses). Before leaving a cell, more than centre_tolerance_m from its
+        # centre or centre_heading_deg off the doorway direction: centre and turn first.
+        # No path in the cell graph -> direct goal as before. false = direct goals only.
+        p('cell_routing', True)
+        p('route_kinds', ['cell', 'frontier', 'room', 'coverage'])
+        p('centre_tolerance_m', 0.15)
+        p('centre_heading_deg', 15.0)
+        # Grid alignment (report only, nothing is corrected): cell centres come from
+        # mission.yaml start_cell_centre / start_heading_deg, i.e. from the start pose.
+        p('grid_check_period_s', 30.0)
+        p('grid_check_offset_m', 0.05)
+        p('grid_check_rot_deg', 3.0)
+        p('grid_check_min_strength', 0.2)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -246,7 +262,9 @@ class FrontierExplorer(Node):
             'idle_warn_period_s', 'frontier_retry_enabled', 'frontier_retry_delay_s',
             'wall_seen_frac', 'keep_visited_walls', 'room_look_wait_done',
             'room_look_timeout_s', 'room_max_relooks', 'no_backup_after_crossing_s',
-            'no_backup_bt_dir',
+            'no_backup_bt_dir', 'cell_routing', 'route_kinds', 'centre_tolerance_m',
+            'centre_heading_deg', 'grid_check_period_s', 'grid_check_offset_m',
+            'grid_check_rot_deg', 'grid_check_min_strength',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -335,6 +353,9 @@ class FrontierExplorer(Node):
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/perception/scene', self.on_scene, 10)
         self.last_crossing_end = None     # [NOBACKUP] issue 8
+        self.route_pending = None         # [ROUTE] issue 10: poses to send after centring
+        self.last_pose = None
+        self.last_grid_check = None
         self.create_subscription(String, '/special/report', self.on_special_report, 10)
         # [PORTAL] issue 7: a crossed curtain (mission_controller) re-opens the far side
         self.create_subscription(String, '/exploration/portal_crossed', self.on_portal, map_qos)
@@ -593,6 +614,7 @@ class FrontierExplorer(Node):
 
     def send_goal(self, xy, robot_xy, is_frontier=True, kind=None, yaw=None, retry=False,
                   target=None, converted=False):
+        explicit_yaw = yaw is not None
         if yaw is None:  # [ROOM] room goals face into the room
             yaw = math.atan2(xy[1] - robot_xy[1], xy[0] - robot_xy[0])
         goal = PoseStamped()
@@ -623,10 +645,23 @@ class FrontierExplorer(Node):
 
         # Humble's commander retains feedback across actions until new feedback arrives.
         self.nav.feedback = None
-        bt = self.bt_file('navigate_to_pose')       # [NOBACKUP] issue 8
-        if bt:
-            self.get_logger().info(f'Goal right after a crossing: Nav2 tree without BackUp ({bt})')
-        accepted = self.nav.goToPose(goal, behavior_tree=bt) if bt else self.nav.goToPose(goal)
+        self.route_pending = None
+        route = self.plan_route(xy, yaw if explicit_yaw else None)     # [ROUTE] issue 10
+        if route is not None:
+            centre, poses, cells_path = route
+            distance = sum(math.dist(a[:2], b[:2]) for a, b in
+                           zip([(robot_xy[0], robot_xy[1], 0.0)] + poses, poses))
+            self.goal_time_limit = (self.P['time_limit_base_s']
+                                    + self.P['time_limit_per_m_s'] * distance)
+            self.get_logger().info(f'Route via cells {cells_path}'
+                                   + (' (centring first)' if centre is not None else ''))
+            if centre is not None:
+                self.route_pending = poses
+                accepted = self.go_to(self.pose_msg(*centre))
+            else:
+                accepted = self.go_through([self.pose_msg(*p) for p in poses])
+        else:
+            accepted = self.go_to(goal)
         if accepted is False:
             if retry:
                 self.defer_pose_goal('Nav2 rejected the localization retry')
@@ -645,6 +680,92 @@ class FrontierExplorer(Node):
             f'Goal ({xy[0]:.2f}, {xy[1]:.2f}), {distance:.1f} m away, '
             f'limit {self.goal_time_limit:.0f} s')
         return True
+
+    # ================= [ROUTE] issue 10 =================
+
+    def pose_msg(self, x, y, yaw):
+        ps = PoseStamped()
+        ps.header.frame_id = self.P['global_frame']
+        ps.header.stamp = self.nav.get_clock().now().to_msg()
+        ps.pose.position.x, ps.pose.position.y = float(x), float(y)
+        _, _, qz, qw = yaw_to_quaternion(yaw)
+        ps.pose.orientation.z, ps.pose.orientation.w = qz, qw
+        return ps
+
+    def go_to(self, ps):
+        bt = self.bt_file('navigate_to_pose')       # [NOBACKUP] issue 8
+        if bt:
+            self.get_logger().info(f'Goal right after a crossing: Nav2 tree without BackUp ({bt})')
+            return self.nav.goToPose(ps, behavior_tree=bt)
+        return self.nav.goToPose(ps)
+
+    def go_through(self, poses):
+        bt = self.bt_file('navigate_through_poses')
+        if bt:
+            return self.nav.goThroughPoses(poses, behavior_tree=bt)
+        return self.nav.goThroughPoses(poses)
+
+    def route_walls(self):
+        """cell -> walls for the cell graph: free cells of the last analysis, plus visited
+        cells with every wall ever seen there (issue 2 memory)."""
+        walls = {c: set(ci.walls) for c, ci in self.cell_info.items() if ci.state == 'free'}
+        for c in self.visited_cells:
+            walls.setdefault(c, set()).update(self.wall_memory.get(c, set()))
+        return walls
+
+    def plan_route(self, goal_xy, goal_yaw=None):
+        """(centre pose or None, [route poses], [cells]) or None = direct goal."""
+        pose = self.last_pose
+        if (not self.P.get('cell_routing') or self.goal_kind not in self.P['route_kinds']
+                or pose is None or not getattr(self, 'cell_info', None)):
+            return None
+        walls = self.route_walls()
+        start = self.cells.cell_of(*pose[:2])
+        path = bfs(start, self.cells.cell_of(*goal_xy), walls)
+        if path is None or len(path) < 2:
+            return None                       # same cell or no known path: direct
+        poses = route_poses(path, self.cells.centre, goal_xy, goal_yaw)
+        centre = None
+        c = self.cells.centre(start)
+        if needs_centring(pose, c, poses[0][2], self.P['centre_tolerance_m'],
+                          self.P['centre_heading_deg']):
+            centre = (c[0], c[1], poses[0][2])
+        return centre, poses, path
+
+    def check_grid_alignment(self, now):
+        """Warn when the walls do not sit on the arena grid (start pose not centred /
+        square). Report only."""
+        period = self.P.get('grid_check_period_s', 0)
+        if period <= 0 or (self.last_grid_check is not None
+                           and now - self.last_grid_check < period):
+            return
+        self.last_grid_check = now
+        grid, info = self.grid, self.info
+        if self.bounds is not None:
+            from types import SimpleNamespace
+            r0, c0 = info.world_to_cell(self.bounds[0], self.bounds[1])
+            r1, c1 = info.world_to_cell(self.bounds[2], self.bounds[3])
+            r0, c0 = max(0, r0), max(0, c0)
+            r1, c1 = min(info.height, r1 + 1), min(info.width, c1 + 1)
+            if r1 <= r0 or c1 <= c0:
+                return
+            grid = grid[r0:r1, c0:c1]
+            info = SimpleNamespace(resolution=info.resolution,
+                                   origin_x=info.origin_x + c0 * info.resolution,
+                                   origin_y=info.origin_y + r0 * info.resolution)
+        est = grid_alignment(grid, info, self.cells.arena, self.P['occupied_min'])
+        if est is None or est['strength'] < self.P['grid_check_min_strength']:
+            return
+        off = max(abs(est['dx_m']), abs(est['dy_m']))
+        msg = (f'grid alignment: walls {est["rot_deg"]:+.1f} deg, '
+               f'{est["dx_m"]:+.3f} m (arena x), {est["dy_m"]:+.3f} m (arena y) from the '
+               f'mission.yaml grid (strength {est["strength"]:.2f}, {est["n"]} wall cells)')
+        if off > self.P['grid_check_offset_m'] or abs(est['rot_deg']) > self.P['grid_check_rot_deg']:
+            self.get_logger().warn(msg + ': cell centres are OFF. Start the robot centred and '
+                                   'square, or fix start_cell_centre / start_heading_deg. '
+                                   'Not corrected automatically.')
+        else:
+            self.get_logger().info(msg, throttle_duration_sec=120.0)
 
     def release_goal_attempt(self):
         """Restore an arena-cell or room attempt interrupted by localization."""
@@ -669,6 +790,7 @@ class FrontierExplorer(Node):
         if cancel:
             self.nav.cancelTask()
             self.pose_cancel_pending = True
+            self.route_pending = None
         self.publish_cmd()
         self.pose_health.reset()
         self.empty_checks = self.cover_empty_checks = 0
@@ -917,6 +1039,7 @@ class FrontierExplorer(Node):
 
     def tick(self):
         pose = self.robot_pose()
+        self.last_pose = pose
         self.localization_pub.publish(Bool(data=(pose is not None and self.grid is not None)))
         now = self.now_s()
         self.deferred_goals = {xy: until for xy, until in self.deferred_goals.items()
@@ -934,6 +1057,7 @@ class FrontierExplorer(Node):
             if self.state in ('NAVIGATE', 'SPIN', 'ROOM_LOOK') and not self.P['dry_run']:
                 self.get_logger().info(f'Cancelling Nav2 {self.state.lower()} for exploration pause.')
                 self.nav.cancelTask()
+                self.route_pending = None
             if self.state in ('SPIN', 'RECOVER', 'HOLD', 'ROOM_LOOK'):  # [HOLD] stop on pause too
                 self.publish_cmd()
             if self.state != 'DONE':
@@ -1127,6 +1251,18 @@ class FrontierExplorer(Node):
 
     def do_navigate(self, pose):
         now = self.now_s()
+
+        # 0. [ROUTE] centring step done (or failed: not a reason to give up): the route
+        if getattr(self, 'route_pending', None) is not None and self.nav.isTaskComplete():
+            poses, self.route_pending = self.route_pending, None
+            self.get_logger().info(f'Centred in the cell ({self.nav.getResult()}), going '
+                                   f'through {len(poses)} waypoints')
+            if self.go_through([self.pose_msg(*p) for p in poses]) is False:
+                self.start_recovery('Nav2 rejected the route')
+                return
+            self.window_remaining = None
+            self.window_start = now
+            return
 
         # 1. Finished (success or failure)?
         if self.nav.isTaskComplete():
@@ -1571,6 +1707,7 @@ class FrontierExplorer(Node):
             self.cell_info = self.cells.analyze(self.grid, self.info, self.P['free_max'],
                                                 self.P['occupied_min'])
             self.cells_seq = self.map_seq
+            self.check_grid_alignment(now)           # [ROUTE] issue 10, report only
         self.last_cells_pub = now
         if self.P['cell_overlay']:
             self.publish_cells()

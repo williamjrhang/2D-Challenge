@@ -175,3 +175,19 @@ frontier_explorer:
     no_backup_after_crossing_s: 30.0 # s after /special/report: no RECOVER back-up, and Nav2 goals use
                                      # config/bt/*_no_backup.xml (default tree minus BackUp 0.30 m)
     no_backup_bt_dir: ""             # "" = installed share/lite3_explore_pose/config/bt
+
+    # ---- Cell-centre routing (issue 10) ----
+    # Nav2 cut corners through 1.02 m doorways and brushed walls. Goals of these kinds go
+    # through the cell graph (BFS over open cell sides): cell centre -> doorway midpoint ->
+    # next centre ... -> goal, as one navigateThroughPoses. No known path -> direct goal.
+    cell_routing: true
+    route_kinds: ['cell', 'frontier', 'room', 'coverage']
+    centre_tolerance_m: 0.15         # m from the cell centre before leaving it (~ Nav2 goal 0.25)
+    centre_heading_deg: 15.0         # deg off the doorway direction -> turn at the centre first
+    # Grid alignment check (report only, WARN). Cell centres come from mission.yaml
+    # start_cell_centre / start_heading_deg = the start pose: not centred / not square = every
+    # 'centre' is off.
+    grid_check_period_s: 30.0        # s between checks (only after a map update)
+    grid_check_offset_m: 0.05        # m walls vs expected cell borders -> WARN
+    grid_check_rot_deg: 3.0          # deg walls vs grid -> WARN
+    grid_check_min_strength: 0.2     # 0..1; below = too little wall on the map to judge
