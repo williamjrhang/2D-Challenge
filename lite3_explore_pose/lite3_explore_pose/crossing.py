@@ -81,3 +81,40 @@ def verify_result(progress_m, need_m, max_tilt_deg, tilt_limit_deg):
 
 def deg(rad):
     return math.degrees(rad)
+
+
+# ================= curtain (issue 7) =================
+
+def approach_pose(obs_xy, from_xy, standoff_m, arena=None, square=False):
+    """Where to stand to face an obstacle: standoff_m before it, facing it.
+    square=True (curtain): the direction is snapped to the nearest arena axis and the
+    curtain's lateral position to the middle of its cell row, so the robot faces the
+    doorway squarely (curtains hang in doorways between 1.02 m cells).
+    Returns (x, y, yaw) in the map frame."""
+    ox, oy = obs_xy
+    fx, fy = from_xy
+    if square and arena is not None:
+        ax, ay = arena.map_to_arena(ox, oy)
+        bx, by = arena.map_to_arena(fx, fy)
+        dx, dy = ax - bx, ay - by
+        sx, sy = arena.start
+        c = arena.cell
+        if abs(dx) >= abs(dy):
+            ux, uy = (1.0 if dx >= 0 else -1.0), 0.0
+            ay = sy + round((ay - sy) / c) * c           # middle of the cell row
+        else:
+            ux, uy = 0.0, (1.0 if dy >= 0 else -1.0)
+            ax = sx + round((ax - sx) / c) * c
+        gx, gy = arena.arena_to_map(ax - standoff_m * ux, ay - standoff_m * uy)
+        tx, ty = arena.arena_to_map(ax, ay)
+        return gx, gy, math.atan2(ty - gy, tx - gx)
+    dx, dy = ox - fx, oy - fy
+    d = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / d, dy / d
+    return ox - standoff_m * ux, oy - standoff_m * uy, math.atan2(uy, ux)
+
+
+def far_side(point, portal_xy, from_xy, to_xy):
+    """True if point is on the side of a crossed curtain the robot walked INTO."""
+    dx, dy = to_xy[0] - from_xy[0], to_xy[1] - from_xy[1]
+    return (point[0] - portal_xy[0]) * dx + (point[1] - portal_xy[1]) * dy > 0.0

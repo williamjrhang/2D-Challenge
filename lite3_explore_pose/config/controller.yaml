@@ -23,3 +23,19 @@ mission_controller:
                                      # (placed, or out of place_attempts); investigate_timeout_s caps it
     investigate_timeout_s: 20.0      # s; existing default, written here so it is visible: a dead
                                      # desktop / link never keeps the robot waiting longer
+
+    # ---- Curtain (issue 7) ----
+    # The lidar maps the curtain as a wall: the explorer never plans through it, so the
+    # curtain is approached on purpose from a sighting. 22/11: YOLO 'curtains' near the start
+    # sent the robot back 3x ('not confirmed up close'): curtain needs more sightings, the
+    # close-up check (curtain_trigger_m + wrinkle) still decides the crossing, and an
+    # approach gives up after approach_wait_s (then never again for that spot).
+    approach_kinds: ['rubble', 'curtain']
+    approach_wait_s: 6.0             # s at the spot waiting for the close-range trigger (existing)
+    curtain_min_sightings: 4         # sightings (2 Hz detector) before driving to a curtain
+    curtain_standoff_m: 0.5          # m before the curtain, facing the doorway squarely
+    # After crossing, the curtain stays a wall on the map. It is recorded as a passable
+    # curtain (/exploration/portal_crossed): the explorer forgets earlier failures behind it.
+    # No Nav2 / costmap change (see README: costmap option needs your OK).
+    portal_return: true              # this side done -> approach the curtain again and cross back
+    portal_max_crossings: 3          # in + out + one more at most

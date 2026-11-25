@@ -108,6 +108,12 @@ class ObstacleDetector(Node):
         p('trigger_distance_m', 1.2)     # obstacle closer than this ...
         p('curtain_trigger_m', 0.7)      # curtain: only this close, and only with depth
         p('sighting_range_m', 3.0)       # report obstacles seen this far away (for APPROACH)
+        # Issue 7: curtains are reported further away (mission_controller drives to them on
+        # purpose; the lidar maps the curtain as a wall). Within curtain_wrinkle_range_m the
+        # surface AT the curtain must look like fabric (wrinkle) or the sighting is dropped;
+        # further away depth is too noisy to judge, repeated sightings decide.
+        p('curtain_sighting_range_m', 2.5)
+        p('curtain_wrinkle_range_m', 1.0)
         p('path_half_width_m', 0.5)      # ... and within this of the robot's centre line
         p('person_distance_m', 3.0)
         p('confirm_frames', 3)
@@ -244,6 +250,7 @@ class ObstacleDetector(Node):
                                agnostic_nms=True)[0]
 
         dets, seen = [], set()
+        curtain_sightings = []
         for box, cls, conf in zip(r.boxes.xyxy.tolist(), r.boxes.cls.tolist(), r.boxes.conf.tolist()):
             kind = self.kind_of.get(int(cls))
             if kind not in EVENTS:
@@ -257,7 +264,10 @@ class ObstacleDetector(Node):
             if xy is not None and pose is not None:
                 fwd, left = self.locator.to_robot(xy, pose)
                 d.update(forward_m=round(fwd, 2), left_m=round(left, 2), located_by='depth')
-                self.report_sighting(kind, fwd, left)
+                if kind == 'curtain':
+                    curtain_sightings.append((fwd, left, conf))   # judged below (issue 7)
+                else:
+                    self.report_sighting(kind, fwd, left)
                 limit = (self.P['person_distance_m'] if kind == 'person'
                          else self.P['curtain_trigger_m'] if kind == 'curtain'
                          else self.P['trigger_distance_m'])
@@ -406,6 +416,9 @@ class ObstacleDetector(Node):
                 self.get_logger().info(f'curtain candidate: wrinkle {wr:.1f} mm (fabric)',
                                        throttle_duration_sec=2.0)
 
+        for fwd, left, conf in curtain_sightings:        # issue 7: sightings for APPROACH
+            self.curtain_sighting(snap, fwd, left, conf)
+
         if stairs_shape:                               # camera models called the steps rubble
             for k in ('rubble', 'potholes'):
                 seen.discard(k)
@@ -500,17 +513,51 @@ class ObstacleDetector(Node):
         c, s = math.cos(yaw), math.sin(yaw)
         return rx + c * fwd - s * left, ry + s * fwd + c * left, rx, ry
 
-    def report_sighting(self, kind, fwd, left):
+    def curtain_wrinkle_at(self, snap, fwd, left):
+        """Wrinkle (mm) of the surface AT a curtain sighting, or None (no / too few points)."""
+        pts = self.base_points(snap) if snap is not None else None
+        if pts is None:
+            return None
+        sel = (np.abs(pts[:, 0] - fwd) < 0.35) & (np.abs(pts[:, 1] - left) < 0.45)
+        sub = pts[sel] - np.array([0.0, left, 0.0])
+        return surface_wrinkle_mm(sub, self.floor_z, x_max=fwd + 0.35)
+
+    def curtain_sighting(self, snap, fwd, left, conf):
+        """Every curtain decision is logged (issue 7)."""
+        if not 0.0 < fwd <= self.P['curtain_sighting_range_m']:
+            self.get_logger().info(f'CURTAIN sighting at {fwd:.2f} m: beyond '
+                                   f'{self.P["curtain_sighting_range_m"]} m, ignored',
+                                   throttle_duration_sec=3.0)
+            return
+        wr = None
+        if fwd <= self.P['curtain_wrinkle_range_m'] and self.P['curtain_flat_check']:
+            wr = self.curtain_wrinkle_at(snap, fwd, left)
+            if wr is not None and wr < self.P['curtain_min_wrinkle_mm']:
+                self.get_logger().info(
+                    f'CURTAIN sighting at {fwd:.2f} m REJECTED: flat ({wr:.1f} mm < '
+                    f'{self.P["curtain_min_wrinkle_mm"]} mm) -> wall', throttle_duration_sec=2.0)
+                return
+        self.get_logger().info(
+            f'CURTAIN sighting at {fwd:.2f} m, {left:+.2f} m left, conf {conf:.2f}, wrinkle '
+            f'{"n/a (far / no depth)" if wr is None else f"{wr:.1f} mm"} -> reported',
+            throttle_duration_sec=2.0)
+        self.report_sighting('curtain', fwd, left,
+                             {'conf': round(float(conf), 2),
+                              'wrinkle_mm': None if wr is None else round(wr, 1)})
+
+    def report_sighting(self, kind, fwd, left, extra=None):
         if not self.P['publish_events'] or kind not in ('stairs', 'curtain', 'rubble'):
             return
-        if not 0.0 < fwd <= self.P['sighting_range_m']:
+        limit = (self.P['curtain_sighting_range_m'] if kind == 'curtain'
+                 else self.P['sighting_range_m'])
+        if not 0.0 < fwd <= limit:
             return
         m = self.to_map(fwd, left)
         if m is None:
             return
         self.seen_pub.publish(String(data=json.dumps(
             {'kind': kind, 'x': round(m[0], 2), 'y': round(m[1], 2),
-             'rx': round(m[2], 2), 'ry': round(m[3], 2)})))
+             'rx': round(m[2], 2), 'ry': round(m[3], 2), **(extra or {})})))
 
     def send(self, kind, dets):
         now = time.monotonic()

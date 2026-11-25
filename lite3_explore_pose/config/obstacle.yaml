@@ -51,3 +51,11 @@ obstacle_detector:
     shadow_dark_frac: 0.15
     shadow_min_brightness: 40.0
     shadow_distance_m: 0.8
+
+    # Curtain APPROACH from range (issue 7). The lidar maps the curtain as a wall, so the
+    # explorer never plans through it: curtain sightings up to curtain_sighting_range_m go
+    # to mission_controller, which drives there on purpose (approach_kinds in controller.yaml).
+    # The crossing itself still needs the close-up trigger above (curtain_trigger_m + wrinkle).
+    curtain_sighting_range_m: 2.5   # m; 2-3 m = the next cell. sighting_range_m (1.5) stays for the others
+    curtain_wrinkle_range_m: 1.0    # m; closer than this the surface AT the sighting must be fabric
+                                    # (curtain_min_wrinkle_mm); further away depth noise > folds

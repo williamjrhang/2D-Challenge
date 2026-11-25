@@ -49,6 +49,7 @@ from lite3_explore_pose.frontiers import (
 import re  # [RECORD]
 
 from lite3_explore_pose.frontier_record import FrontierRecord, record_path
+from lite3_explore_pose.crossing import far_side
 from lite3_explore_pose.investigate import photo_is_stale
 from lite3_explore_pose.frontier_goals import (
     cell_seen_fraction, frontier_step, target_cell, unknown_side_xy,
@@ -326,6 +327,8 @@ class FrontierExplorer(Node):
         self.scene_latency = None         # (arrival, latency_s) of the latest scene answer
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/perception/scene', self.on_scene, 10)
+        # [PORTAL] issue 7: a crossed curtain (mission_controller) re-opens the far side
+        self.create_subscription(String, '/exploration/portal_crossed', self.on_portal, map_qos)
         self.last_cells_pub = 0.0
         # [COVER] RViz: camera coverage grid (latched), pose trail, coverage %
         if self.P['coverage_enabled']:
@@ -428,6 +431,40 @@ class FrontierExplorer(Node):
             self.covering = False  # [COVER] new area may be open: frontiers first again
             self.cover_empty_checks = 0
             self.set_state('SELECT')
+
+    def on_portal(self, msg):
+        try:
+            p = json.loads(msg.data)
+            portal, src, dst = tuple(p['xy']), tuple(p['from']), tuple(p['to'])
+        except (ValueError, KeyError, TypeError):
+            return
+        self.reopen_behind(portal, src, dst)
+
+    def reopen_behind(self, portal, src, dst):
+        """Forget failures on the far side of a crossed curtain (Nav2 could not plan through
+        the 'wall' before; now the robot is over there)."""
+        far = lambda xy: far_side(xy, portal, src, dst)   # noqa: E731
+        nb = len(self.blacklist)
+        self.blacklist = [b for b in self.blacklist if not far(b)]
+        self.deferred_goals = {k: v for k, v in self.deferred_goals.items() if not far(k)}
+        reopened = 0
+        for e in self.frontier_rec.entries:
+            if e['status'] == 'failed' and far(e['goal_xy']) and e['reason'] != 'outside bounds':
+                e.update(status='pending', reason='re-opened: behind a crossed curtain',
+                         retried=False)
+                reopened += 1
+        for cell in list(self.cell_attempts):
+            if far(self.cells.centre(cell)):
+                self.cell_attempts[cell] = 0
+        for cell, st in self.room_status.items():
+            if not st.get('done') and far(self.cells.centre(cell)):
+                st['attempts'] = 0
+        self.final_retry_done, self.retry_queue = False, None
+        self.empty_checks = self.cover_empty_checks = 0
+        self.covering = False
+        self.get_logger().warn(
+            f'CURTAIN crossed at ({portal[0]:.2f}, {portal[1]:.2f}): re-opened the far side '
+            f'({nb - len(self.blacklist)} blacklisted goals, {reopened} failed frontiers)')
 
     def on_look_done(self, msg):
         if msg.data:

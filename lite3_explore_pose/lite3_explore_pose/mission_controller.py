@@ -44,6 +44,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from lite3_explore_pose.crossing import approach_pose, far_side
 from lite3_explore_pose.investigate import LookCooldown, photo_is_stale
 from lite3_explore_pose.mission_config import Arena, load_mission
 
@@ -107,6 +108,12 @@ class MissionController(Node):
         p('stale_margin_s', 0.3)
         p('look_cell_cooldown_s', 60.0)     # no second stop-and-look in the same cell
         p('qr_wait_place', True)            # QR look: stay until qr_reader sent the code
+        # Issue 7: curtain APPROACH (approach_kinds must include 'curtain') and the
+        # passable-curtain record (portal) so the area behind it is not given up.
+        p('curtain_min_sightings', 4)       # curtain needs more sightings than rubble
+        p('curtain_standoff_m', 0.5)        # stand this far before it, square to the doorway
+        p('portal_return', True)            # explored everything on this side -> cross back
+        p('portal_max_crossings', 3)
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'require_localization_ready', 'global_frame', 'tick_hz', 'investigate_timeout_s',
@@ -115,7 +122,8 @@ class MissionController(Node):
             'approach_standoff_m', 'approach_timeout_s', 'approach_wait_s', 'pose_jump_m',
             'pose_jump_hard_m', 'pose_jump_recover_s', 'scene_investigate',
             'investigate_settle_s', 'max_relooks', 'stale_margin_s', 'look_cell_cooldown_s',
-            'qr_wait_place']}
+            'qr_wait_place', 'curtain_min_sightings', 'curtain_standoff_m', 'portal_return',
+            'portal_max_crossings']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -198,6 +206,10 @@ class MissionController(Node):
         self.last_latency = None     # (arrival time, latency_s) of the latest scene answer
         self.qr_event_t = None
         self.last_qr_found_t = None
+        # [PORTAL] issue 7: crossed curtains {xy, from, to, crossings, status}
+        self.portals = []
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.portal_pub = self.create_publisher(String, '/exploration/portal_crossed', latched)
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
         self.enter('EXPLORE')
@@ -325,6 +337,9 @@ class MissionController(Node):
             return
         if s.get('kind') not in self.P['approach_kinds']:
             return
+        if s['kind'] == 'curtain':
+            self.get_logger().info(f'CURTAIN sighting at ({s["x"]:.2f}, {s["y"]:.2f}), wrinkle '
+                                   f'{s.get("wrinkle_mm")}', throttle_duration_sec=2.0)
         for o in self.obstacles:
             if (o['kind'] == s['kind']
                     and math.hypot(o['x'] - s['x'], o['y'] - s['y']) < self.P['approach_merge_m']):
@@ -345,12 +360,16 @@ class MissionController(Node):
             return None
         return t.transform.translation.x, t.transform.translation.y
 
+    def min_sightings(self, kind):
+        return (self.P.get('curtain_min_sightings', self.P['approach_min_sightings'])
+                if kind == 'curtain' else self.P['approach_min_sightings'])
+
     def pick_target(self):
         if self.nav is None or self.out_of_time:
             return None
         here = self.robot_xy()
         cands = [o for o in self.obstacles
-                 if o['status'] == 'new' and o['n'] >= self.P['approach_min_sightings']]
+                 if o['status'] == 'new' and o['n'] >= self.min_sightings(o['kind'])]
         if not cands or here is None:
             return None
         return min(cands, key=lambda o: math.hypot(o['x'] - here[0], o['y'] - here[1]))
@@ -515,6 +534,8 @@ class MissionController(Node):
                 self.look_reason = 'scheduled'
                 self.enter('INVESTIGATE')
             return
+        if self.explore_done and not self.tasks_done and self.portal_back():
+            return
         if self.exit_xy is not None or self.explore_done:
             why = 'All mission tasks done' if self.tasks_done else 'Nothing left to explore'
             self.get_logger().info(f'{why}: heading for the exit.')
@@ -524,22 +545,69 @@ class MissionController(Node):
             self.get_logger().info('Tasks done, still looking for the exit.')
             self.waiting_for_exit = True
 
+    # ---------------- [PORTAL] issue 7 ----------------
+    def record_portal(self):
+        """A crossed curtain stays a wall on the map: remember it as passable and tell the
+        explorer which side is now open (it forgets failures over there)."""
+        here, start = self.robot_xy(), self.traverse_xy
+        if here is None or start is None:
+            return
+        t = self.target if self.target is not None and self.target['kind'] == 'curtain' else None
+        xy = (t['x'], t['y']) if t is not None else ((here[0] + start[0]) / 2,
+                                                     (here[1] + start[1]) / 2)
+        idx = t.get('portal') if t is not None else None
+        if idx is None:
+            idx = next((i for i, p in enumerate(self.portals)
+                        if math.dist(p['xy'], xy) < self.P['approach_merge_m']), None)
+        if idx is None:
+            self.portals.append({'xy': list(xy), 'crossings': 0, 'status': 'ok'})
+            idx = len(self.portals) - 1
+        p = self.portals[idx]
+        p.update(**{'from': list(start), 'to': list(here)})
+        p['crossings'] += 1
+        self.get_logger().warn(f'CURTAIN: passable curtain #{idx} at ({xy[0]:.2f}, {xy[1]:.2f}) '
+                               f'recorded, crossing {p["crossings"]}; the explorer re-opens the '
+                               'cells behind it')
+        self.portal_pub.publish(String(data=json.dumps({'id': idx, **p})))
+
+    def portal_back(self):
+        """Nothing left on this side: walk back through a curtain we came through."""
+        if not self.P.get('portal_return') or self.nav is None:
+            return False
+        here = self.robot_xy()
+        if here is None:
+            return False
+        for i, p in enumerate(self.portals):
+            if (p['status'] != 'ok' or p['crossings'] >= self.P['portal_max_crossings']
+                    or not far_side(here, p['xy'], p['from'], p['to'])):
+                continue
+            self.target = {'kind': 'curtain', 'x': p['xy'][0], 'y': p['xy'][1],
+                           'rx': here[0], 'ry': here[1], 'n': 99, 'status': 'new',
+                           'portal': i}
+            self.explore_done = False
+            self.get_logger().warn(f'CURTAIN: nothing left on this side, going back through '
+                                   f'curtain #{i} at ({p["xy"][0]:.2f}, {p["xy"][1]:.2f})')
+            self.enter('APPROACH')
+            return True
+        return False
+
     def do_approach(self):
         from nav2_simple_commander.robot_navigator import TaskResult
         o = self.target
         if self.time_in_state() < 1.0:        # let the explorer cancel its own goal first
             return
         if not self.approach_sent:
-            dx, dy = o['x'] - o['rx'], o['y'] - o['ry']
-            d = math.hypot(dx, dy) or 1.0
-            ux, uy = dx / d, dy / d               # direction we first saw it from
-            sx = self.P['approach_standoff_m']
+            curtain = o['kind'] == 'curtain'
+            sx = (self.P.get('curtain_standoff_m', 0.5) if curtain
+                  else self.P['approach_standoff_m'])
+            # direction we first saw it from; curtain: square to the doorway (issue 7)
+            gx, gy, yaw = approach_pose((o['x'], o['y']), (o['rx'], o['ry']), sx,
+                                        self.arena, square=curtain)
             goal = PoseStamped()
             goal.header.frame_id = self.P['global_frame']
             goal.header.stamp = self.nav.get_clock().now().to_msg()
-            goal.pose.position.x = o['x'] - sx * ux
-            goal.pose.position.y = o['y'] - sx * uy
-            yaw = math.atan2(uy, ux)              # face the obstacle
+            goal.pose.position.x = gx
+            goal.pose.position.y = gy
             goal.pose.orientation.z = math.sin(yaw / 2)
             goal.pose.orientation.w = math.cos(yaw / 2)
             if self.nav.goToPose(goal) is False:
@@ -565,7 +633,10 @@ class MissionController(Node):
             self.approach_failed('not confirmed up close (false detection?)')
 
     def approach_failed(self, why):
-        self.get_logger().warn(f'Approach to {self.target["kind"]} failed: {why}')
+        self.get_logger().warn(f'{"CURTAIN: " if self.target["kind"] == "curtain" else ""}'
+                               f'Approach to {self.target["kind"]} failed: {why}')
+        if self.target.get('portal') is not None:
+            self.portals[self.target['portal']]['status'] = 'failed'
         self.target['status'] = 'failed'
         self.target = None
         self.enter('EXPLORE')
@@ -620,6 +691,10 @@ class MissionController(Node):
         self.last_special_end = self.now_s()
         self.last_special_kind = self.current_special
         ok = self.special_result == 'success'
+        if self.current_special == 'curtain':
+            self.get_logger().warn(f'CURTAIN: crossing {self.special_result or "timed out"}')
+            if ok:
+                self.record_portal()
         self.mark_obstacles(self.current_special, self.traverse_xy, 'done' if ok else 'failed')
         if self.target is not None and self.target['kind'] == self.current_special:
             self.target['status'] = 'done' if ok else 'failed'
