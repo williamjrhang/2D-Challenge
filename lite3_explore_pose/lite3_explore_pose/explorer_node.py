@@ -202,6 +202,10 @@ class FrontierExplorer(Node):
         # are kept even if a later map analysis calls the cell partial.
         p('wall_seen_frac', 0.5)
         p('keep_visited_walls', True)
+        # Issue 3: spectators above the 0.54 m walls show up as map noise and frontiers
+        # outside the arena. true = frontiers / coverage limited to the grid_bounds_cells
+        # box also without grid_explore. false = old (guard_radius_m box).
+        p('use_grid_bounds_box', False)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -257,6 +261,10 @@ class FrontierExplorer(Node):
         if self.bounds is None and guard > 0:
             self.bounds = [-guard, -guard, guard, guard]  # large-map guard around the start pose
             self.get_logger().info(f'bounds off: large-map guard +/- {guard:.1f} m around the start')
+        if g('use_grid_bounds_box') and not self.P['grid_explore']:
+            self.bounds = CellGrid(arena, bounds_cells=list(g('grid_bounds_cells'))).map_box()
+            self.get_logger().info(f'use_grid_bounds_box: frontiers/coverage limited to '
+                                   f'{[round(v, 2) for v in self.bounds]}')
         if self.P['grid_explore']:          # [GRID] arena box instead of the large-map guard
             self.bounds = self.cells.map_box()
             self.get_logger().info(

@@ -159,3 +159,8 @@ frontier_explorer:
                                      # camera_range_m) -> wall drawn blue (checked)
     keep_visited_walls: true         # walls of visited cells stay drawn when a later map
                                      # update makes the cell 'partial'
+
+    # ---- Noise outside the arena (issue 3) ----
+    use_grid_bounds_box: false       # true = frontiers/coverage only inside grid_bounds_cells
+                                     # (+0.3 m) even without grid_explore. Spectators seen above
+                                     # the 0.54 m walls then no longer create frontiers.
