@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  group5 PC: use ONE network interface for ROS 2 (Fast DDS).
+
+  This PC has two NICs (eth0 192.168.1.75, eth1 192.168.10.75). With the default
+  profile every participant announces both addresses and lite3_domain_bridge_5
+  (192.168.1.50) sends every message to BOTH: measured 25/11 with only FAST-LIO
+  subscribed, 4.6 MB/s arrived on eth0 AND 4.6 MB/s on eth1 (same packets twice).
+  Whitelisting eth0 halves what the bridge has to push for us.
+
+  Use in EVERY terminal that runs ROS on this PC (robot launch, mission, bag, RViz):
+    export FASTRTPS_DEFAULT_PROFILES_FILE=~/challenge_ws/lite3_explore_pose/config/fastdds_one_nic.xml
+  If the PC's eth0 address changes, update <address> below.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_eth0_only</transport_id>
+      <type>UDPv4</type>
+      <!-- 25/11: default 208 KB socket buffers overflowed (935k UDP RcvbufErrors in 56 min).
+           4 MB = this PC's net.core.rmem_max, so no root needed. -->
+      <receiveBufferSize>4194304</receiveBufferSize>
+      <sendBufferSize>4194304</sendBufferSize>
+      <interfaceWhiteList>
+        <address>192.168.1.75</address>
+      </interfaceWhiteList>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>shm_local</transport_id>
+      <type>SHM</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="group5_one_nic" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>udp_eth0_only</transport_id>
+        <transport_id>shm_local</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

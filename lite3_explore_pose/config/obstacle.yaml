@@ -1,0 +1,53 @@
+# Every obstacle_detector setting in one file (loaded by launch/mission.launch.py).
+# Rebuild after editing: colcon build --packages-select lite3_explore_pose
+# publish_events is set by the launch flag publish_obstacles:=true, not here.
+obstacle_detector:
+  ros__parameters:
+    image_topic: /camera/color/image_raw/compressed
+    model: yolov8s-worldv2.pt
+
+    # YOLO-World prompts and the kind each one means (same length). No rubble prompts
+    # (the whole arena is OSB wood); rubble comes from the depth floor check. 'wall' prompts
+    # are decoys: with agnostic NMS they win over a weak 'curtain' box on a wall.
+    prompts: ['metal staircase', 'stairs with handrails', 'white fabric curtain', 'cloth curtain in a doorway', 'plain wooden wall', 'white wall panel']
+    kinds: ['stairs', 'stairs', 'curtain', 'curtain', 'wall', 'wall']
+
+    # CPU budget (default torch used all cores and starved the robot's own programs)
+    threads: 2
+    nice: 10
+    imgsz: 320
+    rate_hz: 2.0
+
+    # Detection
+    conf: 0.25
+    closeup_conf: 0.08            # curtain box covering most of the image: accepted this low
+    closeup_area: 1.01            # 22/11: close-up rule OFF (fired on a wall at 8% conf); was 0.7
+    trigger_distance_m: 1.2       # stairs / rubble / potholes closer than this ...
+    path_half_width_m: 0.5        # ... and within this of the robot's centre line
+    curtain_trigger_m: 0.7        # curtain: only this close, and only with depth
+    sighting_range_m: 1.5         # was 3.0: saw a "curtain" in the neighbouring maze (22 Nov). Only drive to things this close
+    person_distance_m: 3.0
+    confirm_frames: 3             # same kind this many frames in a row -> event
+    cooldown_s: 15.0              # then wait this long before sending that kind again
+
+    # Curtain by colour + depth, and the wall veto (fabric folds vs flat wall)
+    white_curtain_check: false     # 20 Nov: fired on a wall (76% pale, wrinkle 12.7 mm = like the real curtain). Curtain from YOLO only
+    white_frac: 0.7               # share of pale pixels in the image centre
+    white_block_dist_m: 0.7       # something blocking within this distance
+    white_block_points: 2000
+    curtain_flat_check: true
+    curtain_min_wrinkle_mm: 2.5   # tune: read wrinkle_mm at a wall and at the curtain
+
+    # Depth floor check: rubble = bumps, potholes = holes, wall = tall
+    use_floor_check: true
+    floor_half_width_m: 0.25      # robot is 0.37 m wide
+    wall_min_m: 0.2               # MEASURE: set above the tallest rubble block (e.g. 0.35)
+    floor_z_start: -0.356         # floor height in base_link, measured live 17/11 (standing)
+    floor_tolerance_m: 0.05       # floor recalibration only within this of floor_z_start
+
+    # Shadow fallback for potholes (dark patches in the bottom third of the image)
+    use_shadow_check: true
+    shadow_dark_ratio: 0.6
+    shadow_dark_frac: 0.15
+    shadow_min_brightness: 40.0
+    shadow_distance_m: 0.8

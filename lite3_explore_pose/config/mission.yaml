@@ -1,0 +1,79 @@
+# Competition-day settings, read by vlm_watcher, qr_reader, reporter and mission_controller.
+# Everything marked TODO must be filled in from the organisers' lists before the run.
+
+group_id: group05_Gp05            # 25 Nov: server accepts ONLY this spelling (Group05_Gp05, _GP05, _gp05 rejected). Same id for the
+                                  # scene server AND the scoring server.
+
+scene_server: http://192.168.10.141:8000/analyze
+report_server: http://192.168.10.141:8001/task_report
+send_reports: false               # false = only log what WOULD be sent. true on competition day.
+
+# ---- Arena coordinates (booklet F, "Localization Reference Frame") ----
+# Origin (0, 0) = centre of the START cell, +x = robot's start forward, +y = robot's left.
+# Cell centres are 1.02 m apart. "pos" = centre of the cell containing the item.
+# The robot must start on the marked start pose, facing the marked direction.
+arena:
+  cell_size_m: 1.02
+  start_cell_centre: [0.0, 0.0]
+  start_heading_deg: 0.0          # arena +x = robot forward at start (booklet convention)
+  final_cell_centre: null         # PRACTICE: null = explore, then stop where it is.
+                                  # COMPETITION DAY: final cell (Drone Launch Area) of the new
+                                  # layout as [k*1.02, m*1.02], e.g. [3.06, 2.04]. Wrong value =
+                                  # robot drives to the wrong place at the end.
+
+# ---- Fixed vocabulary (booklet v6.1). Anything else -> submission REJECTED. ----
+scene_types: [clothes_shop, fitness_centre, kitchen, market, workshop, clinic, cleaning_room,
+              furniture_shop]
+hazard_labels: [high_voltage, radioactive, chemical, biological, flammable]
+object_labels: [medical_kit, hand_tools, food, water, utensils]
+
+# Signs that look like hazards but must NEVER be reported (booklet v6.1 p.6 shows 10 signs: valid =
+# radioactive, high voltage, biohazard, chemical (molecule: 3 balls joined); flammable not pictured).
+hazard_distractors:
+  - 'exclamation mark "!" (general warning)'
+  - magnet (magnetic field)
+  - laser (laser beam)
+  - non-ionising radiation (antenna / radio waves)
+  - wave or flood
+  - starburst / explosion (spiky sun-like burst around a circle, exploding ball)
+
+# What each room usually contains (prompt hints for the scene server). Rooms are toy play sets
+# (photos 23 Nov: market = toy checkout + cart, workshop = toy workbench, kitchen = toy oven,
+#  clinic = toy medical trolley).
+room_hints:
+  clothes_shop: clothing racks, hangers, folded clothes, shirts, dresses, mannequins
+  fitness_centre: dumbbells, kettlebells, weights, yoga or exercise mats, treadmill, exercise machines
+  kitchen: toy play kitchen (white oven / stove unit with hob and oven door), pots, pans, kettle, plates, cups, cooking utensils, sink, fridge
+  market: toy supermarket - checkout counter with a MARKET sign or price tags, shopping cart or basket, shelves of play food, fruit and vegetables, crates
+  workshop: toy workbench with a tool board (hammers, wrenches, screwdrivers, saws, drills), vice
+  clinic: toy medical trolley (white/teal cart with a monitor, MEDICAL TROLLEY label), medical bed, stethoscope, pill bottles, syringes, wheelchair, doctor props
+  cleaning_room: mops, brooms, buckets, detergent and spray bottles, vacuum cleaner, cloths
+  furniture_shop: sofas, armchairs, chairs, tables, beds, lamps, shelves, cabinets
+
+# ---- Missions (task_id -> what to find). COMPETITION DAY: update from the mission texts. ----
+# Canonical form (safest):  object <label> | hazard <label> | survivor <room> | qr | survivor from_qr
+# Free text also works; ALWAYS check:  python3 tools/check_missions.py
+# A file ~/challenge_ws/missions_today.txt ("M03: survivor kitchen" per line) overrides these
+# lines without touching this file (in case of a software freeze).
+missions:
+  M01: object medical_kit        # find where medical equipment is
+  M02: hazard high_voltage       # damaged electrical installation -> warning sign
+  M03: survivor kitchen          # survivor in the room for food preparation
+  M04: qr                        # first survivor's QR message
+  M05: survivor from_qr          # the other survivor: room named in the QR message
+missions_file: ~/challenge_ws/missions_today.txt
+
+# When an answer is sent (see mission_config.Evidence). Defaults are fine.
+# evidence: {scene_confirm: 1.0, item_confirm: 1.2, resubmit_margin: 0.5}
+
+# Run time (booklet v6.1): 10 min (tentative). Reaching the final cell ends the timed run.
+time_limit_s: 0                   # PRACTICE: 0 = no time limit. COMPETITION DAY: 600
+                                  # (mission_controller heads to the final cell at 600 - margin)
+report_best_guess_at_s: 480       # reporter: send the best (unconfirmed) answers for missions
+                                  # still open this long after the mission starts
+exit_margin_s: 120                # with 600: start heading to the final cell at 8:00
+
+# Expected number of each task; when all are reported -> /mission/tasks_done (leave early).
+# 0 = unknown (never counts as done). Keep 0 if you want the obstacle points (stairs 20,
+# curtain 15, terrain 4x5) - leaving early skips unexplored obstacles.
+expected_counts: {survivor: 0, hazard: 0, object: 0, qr: 0}
