@@ -199,6 +199,24 @@ class CellGrid:
             out[cell] = CellInfo(cell, self.centre(cell), state, round(free, 3), walls, goal)
         return out
 
+    def wall_seen_frac(self, grid, info, seen, cell, side, occupied_min=65):
+        """Share of a wall's occupied stretch the camera has looked at (coverage seen mask
+        marks the first wall cell each camera ray hits). 0.0 if no wall cells / no mask."""
+        if seen is None:
+            return 0.0
+        xs, ys = self._to_map(cell, self._side_uv[side])         # (along, across)
+        col = np.floor((xs - info.origin_x) / info.resolution).astype(int)
+        row = np.floor((ys - info.origin_y) / info.resolution).astype(int)
+        inside = (row >= 0) & (row < info.height) & (col >= 0) & (col < info.width)
+        rc, cc = np.clip(row, 0, info.height - 1), np.clip(col, 0, info.width - 1)
+        occ = inside & (grid[rc, cc] >= occupied_min)
+        hit = occ & seen[rc, cc]
+        rows_occ = occ.any(axis=1)
+        n = int(rows_occ.sum())
+        if n == 0:
+            return 0.0
+        return float((hit.any(axis=1) & rows_occ).sum()) / n
+
     # ---------- rooms ----------
     def room_of(self, info_cell, standoff_m=0.15):
         """Room (3 walls, 1 doorway) -> where to stand and where to look; else None.

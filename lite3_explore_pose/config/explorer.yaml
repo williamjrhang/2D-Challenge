@@ -145,3 +145,17 @@ frontier_explorer:
     pose_jump_recover_s: 10.0        # s; > slam_toolbox map_update_interval (2 s) x a few updates
     pose_jump_hard_m: 5.0            # m; bigger jumps (20/11: tens of metres) never clear: restart
     idle_warn_period_s: 5.0          # s between "Explorer not moving: state=..., reason: ..." WARNs
+
+    # ---- Frontier record + final retry (issue 2) ----
+    # Every chosen frontier is kept in coverage_<time>.frontiers.json next to the coverage
+    # file (pending / explored / failed + reason), shown in /exploration/cells namespace
+    # frontier_status (explored green, failed red, pending blue) and restored with
+    # resume_coverage. Before COVER / DONE each failed or pending frontier is retried ONCE.
+    frontier_retry_enabled: true
+    frontier_retry_delay_s: 20.0     # s after its last failure (costmap clears, robot is elsewhere
+                                     # = a different approach direction)
+    # ---- Walls in /exploration/cells (issue 2) ----
+    wall_seen_frac: 0.5              # share (0-1) of a wall's length the camera saw (within
+                                     # camera_range_m) -> wall drawn blue (checked)
+    keep_visited_walls: true         # walls of visited cells stay drawn when a later map
+                                     # update makes the cell 'partial'

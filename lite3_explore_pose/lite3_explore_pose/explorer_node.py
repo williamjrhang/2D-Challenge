@@ -52,6 +52,9 @@ from lite3_explore_pose.gait import GAIT_COMMAND_QOS, send_gait
 from lite3_explore_pose.frontiers import (
     MapInfo, find_frontiers, score_frontiers, still_frontier,
 )
+import re  # [RECORD]
+
+from lite3_explore_pose.frontier_record import FrontierRecord, record_path
 from lite3_explore_pose.frontier_goals import (
     cell_seen_fraction, frontier_step, target_cell, unknown_side_xy,
 )
@@ -68,6 +71,18 @@ from lite3_explore_pose.pose_health import PoseHealth
 
 # [HOLD] detections that may be the reason Nav2 is stuck (gait-change obstacles)
 HOLD_KINDS = ('stairs', 'rubble', 'curtain', 'potholes')
+
+
+def failure_key(why):
+    """Short, countable failure reason: 'Nav2 result ABORTED' -> 'Nav2 ABORTED'."""
+    m = re.match(r'Nav2 result (\w+)', why)
+    if m:
+        return f'Nav2 {m.group(1)}'
+    for key, short in (('goal time limit', 'time limit'), ('progress', 'no progress'),
+                       ('rejected', 'Nav2 rejected')):
+        if key in why:
+            return short
+    return why
 
 
 def yaw_to_quaternion(yaw):
@@ -177,6 +192,16 @@ class FrontierExplorer(Node):
         p('pose_jump_recover_s', 10.0)
         p('pose_jump_hard_m', 5.0)
         p('idle_warn_period_s', 5.0)        # throttled WARN 'not moving: state, reason'
+        # [RECORD] issue 2: every chosen frontier is recorded (pending / explored / failed,
+        # saved next to the coverage file). Before COVER / DONE every failed or still
+        # pending frontier is retried once (frontier_retry_delay_s after its failure).
+        p('frontier_retry_enabled', True)
+        p('frontier_retry_delay_s', 20.0)
+        # [WALLS] a wall turns blue in /exploration/cells once the camera saw this share
+        # of it (coverage seen mask), not only after a room check. Walls of visited cells
+        # are kept even if a later map analysis calls the cell partial.
+        p('wall_seen_frac', 0.5)
+        p('keep_visited_walls', True)
 
         g = lambda name: self.get_parameter(name).value
         self.P = {name: g(name) for name in [
@@ -204,7 +229,8 @@ class FrontierExplorer(Node):
             'cell_overlay', 'grid_explore', 'grid_bounds_cells', 'grid_max_attempts',
             'cell_visit_edge_margin_m',
             'frontier_enter_cell', 'frontier_seen_done_frac', 'frontier_lead_m',
-            'idle_warn_period_s',
+            'idle_warn_period_s', 'frontier_retry_enabled', 'frontier_retry_delay_s',
+            'wall_seen_frac', 'keep_visited_walls',
         ]})
         try:
             arena = Arena(load_mission(g('mission_file')))
@@ -248,6 +274,14 @@ class FrontierExplorer(Node):
         self.n_saved = 0
         self.coverage_path = (os.path.expanduser(self.P['coverage_file'])
                               if self.P['coverage_file'] else default_coverage_path())
+        # [RECORD] frontier record next to the coverage file
+        self.frontier_rec = FrontierRecord(self.P['blacklist_radius_m'])
+        self.record_path = record_path(self.coverage_path)
+        self.retry_queue = None           # ids still to retry in the final pass
+        self.final_retry_done = False
+        self.goal_record_xy = None        # frontier xy this goal belongs to (record key)
+        self.walls_seen = set()           # [WALLS] (cell, side) the camera looked at
+        self.wall_memory = {}             # [WALLS] visited cell -> walls ever found
         if self.P['coverage_enabled']:
             if self.bounds is None:
                 self.get_logger().warn(
@@ -446,6 +480,8 @@ class FrontierExplorer(Node):
             self.blacklist.append(self.goal_xy)
             self.get_logger().warn(
                 f'Blacklisted ({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f}): {why}')
+            if self.goal_is_frontier and getattr(self, 'goal_record_xy', None) is not None:
+                self.frontier_rec.failed(self.goal_record_xy, self.now_s(), failure_key(why))
 
     def send_goal(self, xy, robot_xy, is_frontier=True, kind=None, yaw=None, retry=False,
                   target=None, converted=False):
@@ -472,6 +508,8 @@ class FrontierExplorer(Node):
         self.goal_hold_used = False
         self.goal_target_cell = target      # [ENTER]
         self.goal_converted = converted
+        if not converted:                   # [RECORD] converted goals keep their frontier
+            self.goal_record_xy = xy if is_frontier else None
         distance = math.hypot(xy[0] - robot_xy[0], xy[1] - robot_xy[1])
         self.goal_time_limit = self.P['time_limit_base_s'] + self.P['time_limit_per_m_s'] * distance
 
@@ -679,7 +717,16 @@ class FrontierExplorer(Node):
         self.cover_markers = arr
         self.marker_pub.publish(arr)
 
+    def save_record(self):
+        if not self.frontier_rec.entries:
+            return
+        try:
+            self.frontier_rec.save(self.record_path)
+        except OSError as e:
+            self.get_logger().warn(f'Could not save frontier record {self.record_path}: {e}')
+
     def save_coverage(self):
+        self.save_record()  # [RECORD]
         if not self.P['coverage_enabled'] or len(self.poses.poses) == self.n_saved:
             return
         meta = {
@@ -709,6 +756,14 @@ class FrontierExplorer(Node):
             self.get_logger().error(f'resume_coverage: could not load {src}: {e!r}; starting empty.')
             return
         self.poses.poses = list(poses)
+        rec = record_path(src)
+        if os.path.exists(rec):
+            try:
+                self.frontier_rec = FrontierRecord.load(rec, self.P['blacklist_radius_m'])
+                self.get_logger().info(f'Resumed frontier record {rec}: '
+                                       f'{self.frontier_rec.summary()}')
+            except (OSError, ValueError) as e:
+                self.get_logger().error(f'resume_coverage: frontier record {rec}: {e!r}')
         self.get_logger().warn(
             f'Resumed {len(poses)} coverage poses from {src}. This is ONLY valid if SLAM kept '
             'the same map frame (same saved map / same start pose); otherwise set '
@@ -903,6 +958,10 @@ class FrontierExplorer(Node):
             if self.covering and not self.P['dry_run']:
                 self.enter_cover()
                 return
+            # [RECORD] final retry pass already running: next one, no empty-check wait
+            if (self.retry_queue is not None and not self.final_retry_done
+                    and not self.P['dry_run'] and self.start_final_retry(pose, frontiers)):
+                return
             self.empty_checks += 1
             self.get_logger().info(
                 f'No eligible frontier ({counts}); empty checks '
@@ -914,6 +973,9 @@ class FrontierExplorer(Node):
                 # [ROOM] no frontiers left: every remaining room, however far
                 if self.start_room(pose, None):
                     return
+                # [RECORD] nothing reachable is dropped silently: retry failed ones once
+                if self.start_final_retry(pose, frontiers):
+                    return
                 # [COVER] mapped is not seen: look where the camera has not been first
                 if self.P['coverage_enabled']:
                     self.get_logger().info('No reachable frontiers left: checking camera coverage (COVER).')
@@ -922,6 +984,7 @@ class FrontierExplorer(Node):
                     self.enter_cover()
                     return
                 self.get_logger().info('No reachable frontiers left: exploration done.')
+                self.log_frontier_list('DONE')
                 self.done_pub.publish(Bool(data=True))
                 self.set_state('DONE')
             return
@@ -945,6 +1008,7 @@ class FrontierExplorer(Node):
         self.get_logger().info(f'Selected highest-scoring frontier ({counts}), best first: {top}'
                                + (f'; leads into cell {target}' if target is not None else ''))
         if self.send_goal(best.goal_xy, pose[:2], is_frontier=True, target=target):
+            self.frontier_rec.add(best.goal_xy, target, self.now_s())   # [RECORD]
             self.set_state('NAVIGATE')
 
     def do_navigate(self, pose):
@@ -999,6 +1063,8 @@ class FrontierExplorer(Node):
                 # Don't come straight back if this spot is still a frontier (e.g. glass).
                 if self.goal_is_frontier:
                     self.blacklist.append(self.goal_xy)
+                    if getattr(self, 'goal_record_xy', None) is not None:
+                        self.frontier_rec.explored(self.goal_record_xy, self.now_s())
                     if self.goal_target_cell is not None and self.visit_cell(pose) is not None:
                         self.record_visit(self.visit_cell(pose))
                 # [COVER] reached coverage goals are blacklisted too
@@ -1133,12 +1199,71 @@ class FrontierExplorer(Node):
         here = self.visit_cell(pose) if pose is not None else None
         why = 'entered' if here == target else 'camera already saw it'
         self.get_logger().info(f'Frontier done: cell {target} {why}.')
+        if getattr(self, 'goal_record_xy', None) is not None:
+            self.frontier_rec.explored(self.goal_record_xy, self.now_s(),
+                                       f'reached: cell {target} {why}')
         if here is not None:
             self.record_visit(here)
         self.blacklist.append(self.goal_xy)
         self.failures_in_a_row = 0
         self.last_good_xy = self.goal_xy
         self.set_state('SELECT')
+
+    # ================= [RECORD] final retry + list =================
+
+    def start_final_retry(self, pose, detected=()):
+        """Retry every failed / pending frontier once before COVER or DONE.
+        True = a goal was sent or we wait for one to become due."""
+        if not self.P['frontier_retry_enabled'] or self.final_retry_done or self.P['dry_run']:
+            return False
+        now = self.now_s()
+        rec = self.frontier_rec
+        if self.retry_queue is None:
+            if self.bounds is not None:                 # list what was never eligible
+                xmin, ymin, xmax, ymax = self.bounds
+                for f in find_frontiers(self.grid, self.info,
+                                        min_size_cells=self.P['min_frontier_size_cells'],
+                                        free_max=self.P['free_max'],
+                                        occupied_min=self.P['occupied_min'],
+                                        clearance_m=self.P['goal_clearance_m']):
+                    x, y = f.goal_xy
+                    if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                        rec.note(f.goal_xy, self.cells.cell_of(x, y), now, 'failed',
+                                 'outside bounds')
+            self.retry_queue = [e['id'] for e in rec.retry_candidates(now)]
+            self.get_logger().info(f'Final frontier retry pass: {len(self.retry_queue)} to retry '
+                                   f'({rec.summary()})')
+        while self.retry_queue:
+            due = [i for i in self.retry_queue
+                   if now - rec.entries[i]['t'] >= self.P['frontier_retry_delay_s']]
+            if not due:
+                self.warn_idle(f'final retry: waiting {self.P["frontier_retry_delay_s"]:.0f} s '
+                               'after the last failure before retrying')
+                return True
+            e = rec.entries[due[0]]
+            self.retry_queue.remove(due[0])
+            e['retried'] = True
+            xy = tuple(e['goal_xy'])
+            radius = self.P['blacklist_radius_m']
+            self.blacklist = [b for b in self.blacklist if math.dist(b, xy) >= radius]
+            self.deferred_goals = {k: v for k, v in self.deferred_goals.items()
+                                   if math.dist(k, xy) >= radius}
+            target = tuple(e['cell']) if e['cell'] else None
+            self.get_logger().info(f'Final retry #{e["id"]} ({xy[0]:.2f}, {xy[1]:.2f}) '
+                                   f'cell {target}, was: {e["reason"]}')
+            if self.send_goal(xy, pose[:2], is_frontier=True, target=target):
+                rec.add(xy, target, now)
+                self.set_state('NAVIGATE')
+                return True
+        self.final_retry_done = True
+        self.log_frontier_list('end of the final retry pass')
+        return False
+
+    def log_frontier_list(self, when):
+        lines = self.frontier_rec.lines()
+        self.get_logger().info(f'Frontier list ({when}): {self.frontier_rec.summary()}'
+                               + ''.join(f'\n  {ln}' for ln in lines))
+        self.save_record()
 
     def start_recovery(self, why):
         if self.goal_kind == 'room' and self.room is not None:  # [ROOM]
@@ -1243,6 +1368,7 @@ class FrontierExplorer(Node):
         where = 'inside bounds' if self.bounds is not None else 'of the whole map (bounds off)'
         self.get_logger().info(
             f'Exploration done: {why}. Final camera coverage {100.0 * frac:.1f}% {where}.')
+        self.log_frontier_list('DONE')
         self.save_coverage()
         self.done_pub.publish(Bool(data=True))
         self.set_state('DONE')
@@ -1465,8 +1591,8 @@ class FrontierExplorer(Node):
         cubes.color.a = 0.75
         cubes.scale.x = cubes.scale.y = 0.5
         cubes.scale.z = 0.02
-        walls = mk('walls', 0, Marker.LINE_LIST)
-        walls.scale.x = 0.06
+        wall_lines = mk('walls', 0, Marker.LINE_LIST)
+        wall_lines.scale.x = 0.06
         rooms = {r.cell for r in self.cells.rooms(self.cell_info)}
         h = self.cells.size / 2.0
         n = 1
@@ -1477,10 +1603,26 @@ class FrontierExplorer(Node):
             cubes.points.append(Point(x=x, y=y, z=0.03))
             cubes.colors.append(ColorRGBA(r=0.1, g=0.8, b=0.2, a=1.0) if cell in self.visited_cells
                                 else ColorRGBA(r=0.8, g=0.8, b=0.8, a=1.0))
-        for cell in sorted(displayed & self.cell_info.keys()):
-            ci = self.cell_info[cell]
+        seen = self.current_seen() if self.P.get('coverage_enabled') else None
+        for cell in sorted(displayed):
+            ci = self.cell_info.get(cell)
+            walls = set(ci.walls) if ci is not None else set()
+            if cell in self.visited_cells and self.P.get('keep_visited_walls', True):
+                self.wall_memory.setdefault(cell, set()).update(walls)   # [WALLS] keep them
+                walls |= self.wall_memory[cell]
+            if not walls:
+                continue
+            centre = ci.centre if ci is not None else self.cells.centre(cell)
             looked = set(self.room_status.get(cell, {}).get('views_done', []))
-            for side in ci.walls:
+            for side in walls:                               # [WALLS] camera looked at it?
+                if (cell, side) not in self.walls_seen and seen is not None and (
+                        self.cells.wall_seen_frac(self.grid, self.info, seen, cell, side,
+                                                  self.P['occupied_min'])
+                        >= self.P.get('wall_seen_frac', 0.5)):
+                    self.walls_seen.add((cell, side))
+                if (cell, side) in self.walls_seen:
+                    looked.add(side)
+            for side in sorted(walls):
                 nu, nv = SIDES[side]
                 col = (ColorRGBA(r=0.1, g=0.4, b=1.0, a=0.95) if side in looked
                        else ColorRGBA(r=1.0, g=0.9, b=0.0, a=0.95))
@@ -1488,9 +1630,9 @@ class FrontierExplorer(Node):
                     du = nu * (h - 0.05) - nv * t * (h - 0.1)
                     dv = nv * (h - 0.05) + nu * t * (h - 0.1)
                     mx, my = self.cells.vec_to_map(du, dv)
-                    walls.points.append(Point(x=ci.centre[0] + mx, y=ci.centre[1] + my, z=0.05))
-                    walls.colors.append(col)
-            if cell in rooms:
+                    wall_lines.points.append(Point(x=centre[0] + mx, y=centre[1] + my, z=0.05))
+                    wall_lines.colors.append(col)
+            if cell in rooms and ci is not None:
                 st = self.room_status.get(cell, {})
                 label = mk('rooms', n, Marker.TEXT_VIEW_FACING)
                 n += 1
@@ -1503,8 +1645,19 @@ class FrontierExplorer(Node):
                 arr.markers.append(label)
         if cubes.points:
             arr.markers.append(cubes)
-        if walls.points:
-            arr.markers.append(walls)
+        if wall_lines.points:
+            arr.markers.append(wall_lines)
+        # [RECORD] frontier status: explored green, failed red, pending blue
+        colours = {'explored': (0.1, 0.8, 0.2), 'failed': (0.9, 0.1, 0.1),
+                   'pending': (0.2, 0.4, 1.0)}
+        for e in getattr(self, 'frontier_rec', FrontierRecord()).entries:
+            m = mk('frontier_status', e['id'], Marker.SPHERE)
+            m.pose.position.x, m.pose.position.y = e['goal_xy']
+            m.pose.position.z = 0.15
+            m.scale.x = m.scale.y = m.scale.z = 0.22
+            r, g_, b = colours.get(e['status'], (0.5, 0.5, 0.5))
+            m.color = ColorRGBA(r=r, g=g_, b=b, a=0.9)
+            arr.markers.append(m)
         self.cells_pub.publish(arr)
 
     def stop(self):

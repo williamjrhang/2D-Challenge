@@ -140,6 +140,7 @@ def test_visit_requires_advancing_pose_inside_cell_and_draws_without_map_classif
     explorer.room_status = {}
     explorer.visited_cells = set()
     explorer.visit_sample = None
+    explorer.wall_memory, explorer.walls_seen = {}, set()
     pose = (1.39, 0.0, 0.0)  # Inside cell (1, 0), outside its old central square.
     for sample in (pose, pose):
         FrontierExplorer.update_cells(explorer, sample)

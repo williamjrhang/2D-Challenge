@@ -1,0 +1,7 @@
+reporter:
+  ros__parameters:
+    # Issue 2: QR / hazard / survivor sightings drawn at their WALL position in
+    # /mission/found_markers (namespace wall_items). Sightings of the same item closer than
+    # this are merged (running mean). 0.5 m: half a cell; two items on one wall are
+    # normally further apart, repeated placements of one item scatter ~0.1-0.3 m.
+    wall_item_merge_m: 0.5           # m

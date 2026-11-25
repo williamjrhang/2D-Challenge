@@ -11,6 +11,7 @@ from lite3_explore_pose.cells import CellGrid
 from lite3_explore_pose.explorer_node import FrontierExplorer
 from lite3_explore_pose.frontier_goals import (cell_seen_fraction, frontier_step, target_cell,
                                                unknown_side_xy)
+from lite3_explore_pose.frontier_record import FrontierRecord
 from lite3_explore_pose.frontiers import MapInfo
 from lite3_explore_pose.mission_config import Arena
 from lite3_explore_pose.pose_health import PoseHealth
@@ -101,6 +102,9 @@ def explorer(grid, info):
         return True
     e.send_goal = send_goal
     e.sent = sent
+    e.frontier_rec = FrontierRecord()
+    e.frontier_rec.add((1.52, 0.0), (2, 0), 100.0)
+    e.goal_record_xy = (1.52, 0.0)
     send_goal((1.52, 0.0), (-0.5, 0.0), target=(2, 0))
     e.state = 'NAVIGATE'
     return e
@@ -125,6 +129,7 @@ def test_frontier_mapped_two_metres_away_is_not_cancelled_and_completes_only_ins
     e.nav.cancelTask.assert_called_once()
     assert e.state == 'SELECT'
     assert (2, 0) in e.visited_cells
+    assert e.frontier_rec.entries[0]['status'] == 'explored'   # issue 2 record
 
 
 def test_nav2_success_at_the_frontier_edge_converts_to_enter_the_cell():

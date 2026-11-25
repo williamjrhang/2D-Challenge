@@ -148,7 +148,7 @@ def generate_launch_description():
         OpaqueFunction(function=record_decisions, args=[decision_nodes]),
         OpaqueFunction(function=wall_pins),
         *decision_nodes.values(),
-        node('reporter', [{'mission_file': mission}]),
+        node('reporter', [os.path.join(cfg, 'reporter.yaml'), {'mission_file': mission}]),
         node('vlm_watcher', [{'mission_file': mission, 'use_depth_cloud': depth}],
              IfCondition(LaunchConfiguration('use_vlm'))),
         node('qr_reader', [{'use_depth_cloud': depth}], IfCondition(LaunchConfiguration('use_qr'))),

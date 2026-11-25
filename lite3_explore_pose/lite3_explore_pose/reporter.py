@@ -42,9 +42,26 @@ from visualization_msgs.msg import Marker, MarkerArray
 from lite3_explore_pose.mission_config import (Arena, Evidence, load_mission, load_missions,
                                           make_report, parse_mission, range_weight)
 
+WALL_KINDS = ('qr', 'hazard', 'survivor')   # things pinned on walls (booklet)
 COLOURS = {'survivor': (1.0, 0.2, 0.2), 'hazard': (1.0, 0.8, 0.0),
            'object': (0.2, 0.6, 1.0), 'qr': (0.6, 0.2, 1.0)}
 PLACEHOLDERS = ('PIN', 'XXXX')
+
+
+def merge_wall_item(items, kind, text, xy, merge_m):
+    """Same kind + text within merge_m = same item (running mean); else a new one."""
+    for w in items:
+        if (w['kind'] == kind and w['text'] == text
+                and ((w['x'] - xy[0]) ** 2 + (w['y'] - xy[1]) ** 2) ** 0.5 < merge_m):
+            n = w['n']
+            w['x'] = (w['x'] * n + xy[0]) / (n + 1)
+            w['y'] = (w['y'] * n + xy[1]) / (n + 1)
+            w['n'] = n + 1
+            return w
+    w = {'id': len(items), 'kind': kind, 'text': text, 'x': float(xy[0]), 'y': float(xy[1]),
+         'n': 1}
+    items.append(w)
+    return w
 
 
 def should_send(new, old, margin):
@@ -67,6 +84,11 @@ class Reporter(Node):
         super().__init__('reporter')
         self.declare_parameter('mission_file', '')
         self.declare_parameter('log_dir', os.path.expanduser('~/challenge_ws/reports'))
+        # Issue 2: wall items (QR / hazard / survivor) as RViz markers at their WALL position
+        # (raw_xy), merged within wall_item_merge_m and moved to the running mean.
+        self.declare_parameter('wall_item_merge_m', 0.5)
+        self.wall_merge = float(self.get_parameter('wall_item_merge_m').value)
+        self.wall_items = []        # {key, kind, text, x, y, n}
         self.cfg = load_mission(self.get_parameter('mission_file').value)
         self.arena = Arena(self.cfg)
         self.evidence = Evidence(self.cfg, self.arena)
@@ -156,6 +178,7 @@ class Reporter(Node):
             else:
                 return
         self.log({'event': 'sighting', 'cell': list(cell) if cell else None, 'item': item})
+        self.wall_item(item)
         self.evaluate()
 
     # ================= decide and send =================
@@ -255,6 +278,29 @@ class Reporter(Node):
         if wanted and all(counts.get(k, 0) >= v for k, v in wanted.items()):
             self.get_logger().info('All expected tasks reported.')
             self.done_pub.publish(Bool(data=True))
+
+    def wall_item(self, item):
+        """Marker at the wall where a QR / hazard / survivor picture was placed."""
+        t, raw = item.get('task_type'), item.get('raw_xy')
+        if t not in WALL_KINDS or not raw:
+            return
+        text = item.get('message') if t == 'qr' else (item.get('label') or t)
+        w = merge_wall_item(self.wall_items, t, text, raw, self.wall_merge)
+        arr = MarkerArray()
+        for k, kind in enumerate((Marker.CUBE, Marker.TEXT_VIEW_FACING)):
+            m = Marker()
+            m.header.frame_id = 'map'
+            m.ns, m.id, m.type, m.action = 'wall_items', w['id'] * 2 + k, kind, Marker.ADD
+            m.pose.position.x, m.pose.position.y = float(w['x']), float(w['y'])
+            m.pose.position.z = 0.35 if kind == Marker.CUBE else 0.65
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = 0.12
+            m.scale.z = 0.12 if kind == Marker.CUBE else 0.15
+            m.color.r, m.color.g, m.color.b = COLOURS.get(t, (1.0, 1.0, 1.0))
+            m.color.a = 0.95
+            m.text = f'{t}: {str(text)[:24]} (x{w["n"]})'
+            arr.markers.append(m)
+        self.marker_pub.publish(arr)
 
     def add_marker(self, tid, a):
         """One cylinder + label per task, at the reported cell (moves if the answer changes)."""
