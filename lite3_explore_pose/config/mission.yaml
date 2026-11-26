@@ -8,7 +8,7 @@ scene_server: http://192.168.10.141:8000/analyze
 # Practice: use task_report_A for the left arena or task_report_B for the right arena
 # when facing the canteen. Either endpoint works during competition.
 report_server: http://192.168.10.141:8001/task_report_A
-send_reports: false               # false = only log what WOULD be sent. true on competition day.
+send_reports: true               # false = only log what WOULD be sent. true on competition day.
 
 # ---- Arena coordinates (booklet F, "Localization Reference Frame") ----
 # Origin (0, 0) = centre of the START cell, +x = robot's start forward, +y = robot's left.
