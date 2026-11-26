@@ -106,8 +106,8 @@ frontier_explorer:
     cell_overlay: true
 
     # ---- GRID explore ----
-    # Visit arena cells one by one (nearest free unvisited cell first) instead of chasing
-    # frontiers; frontiers only to uncover cells that are still unknown. Everything (cells,
+    # Confirm one neighbouring cell at a time along a route to a reachable unvisited cell.
+    # Frontiers uncover cells that are still unknown. Everything (cells,
     # frontiers, coverage) stays inside grid_bounds_cells: arena cells relative to the start
     # cell, [i_min, j_min, i_max, j_max], +i = start forward, +j = start left.
     # Default: 5 rows + final cell forward (0..5), 2 cells each side (mirrored arenas: the
@@ -177,9 +177,9 @@ frontier_explorer:
     no_backup_bt_dir: ""             # "" = installed share/lite3_explore_pose/config/bt
 
     # ---- Cell-centre routing (issue 10) ----
-    # Nav2 cut corners through 1.02 m doorways and brushed walls. Goals of these kinds go
-    # through the cell graph (BFS over open cell sides): cell centre -> doorway midpoint ->
-    # next centre ... -> goal, as one navigateThroughPoses. No known path -> direct goal.
+    # Grid steps use one NavigateToPose per cell, with a centring goal first if needed.
+    # Other routed goals use the cell graph (BFS over open sides) to send doorway midpoints
+    # and cell centres in one NavigateThroughPoses goal when a grid route is available.
     cell_routing: true
     route_kinds: ['cell', 'frontier', 'room', 'coverage']
     centre_tolerance_m: 0.15         # m from the cell centre before leaving it (~ Nav2 goal 0.25)

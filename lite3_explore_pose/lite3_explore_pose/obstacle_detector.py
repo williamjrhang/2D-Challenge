@@ -302,9 +302,11 @@ class ObstacleDetector(Node):
             + (', '.join(f'{d["kind"]} {d["conf"]:.2f}' for d in dets if 'box' in d) or 'none'),
             throttle_duration_sec=3.0)
 
+        colour_curtain = None
         if self.P['white_curtain_check'] and snap is not None and 'curtain' not in seen:
             dist, frac = self.white_curtain(img, snap)
             if dist is not None:
+                colour_curtain = (dist, 0.0, frac)
                 seen.add('curtain')
                 dets.append({'kind': 'curtain', 'conf': round(frac, 2), 'forward_m': round(dist, 2),
                              'located_by': 'colour+depth', 'trigger': True})
@@ -421,8 +423,12 @@ class ObstacleDetector(Node):
                 self.get_logger().info(f'curtain candidate: wrinkle {wr:.1f} mm (fabric)',
                                        throttle_duration_sec=2.0)
 
+        has_curtain_location = False
         for fwd, left, conf in curtain_sightings:        # issue 7: sightings for APPROACH
-            self.curtain_sighting(snap, fwd, left, conf)
+            if self.curtain_sighting(snap, fwd, left, conf):
+                has_curtain_location = True
+        if colour_curtain is not None and not has_curtain_location and 'curtain' in seen:
+            self.curtain_sighting(snap, *colour_curtain)
 
         if stairs_shape:                               # camera models called the steps rubble
             for k in ('rubble', 'potholes'):
@@ -533,7 +539,7 @@ class ObstacleDetector(Node):
             self.get_logger().info(f'CURTAIN sighting at {fwd:.2f} m: beyond '
                                    f'{self.P["curtain_sighting_range_m"]} m, ignored',
                                    throttle_duration_sec=3.0)
-            return
+            return False
         wr = None
         if fwd <= self.P['curtain_wrinkle_range_m'] and self.P['curtain_flat_check']:
             wr = self.curtain_wrinkle_at(snap, fwd, left)
@@ -541,32 +547,36 @@ class ObstacleDetector(Node):
                 self.get_logger().info(
                     f'CURTAIN sighting at {fwd:.2f} m REJECTED: flat ({wr:.1f} mm < '
                     f'{self.P["curtain_min_wrinkle_mm"]} mm) -> wall', throttle_duration_sec=2.0)
-                return
+                return False
         self.get_logger().info(
             f'CURTAIN sighting at {fwd:.2f} m, {left:+.2f} m left, conf {conf:.2f}, wrinkle '
             f'{"n/a (far / no depth)" if wr is None else f"{wr:.1f} mm"} -> reported',
             throttle_duration_sec=2.0)
-        self.report_sighting('curtain', fwd, left,
-                             {'conf': round(float(conf), 2),
-                              'wrinkle_mm': None if wr is None else round(wr, 1)})
+        return self.report_sighting('curtain', fwd, left,
+                                    {'conf': round(float(conf), 2),
+                                     'wrinkle_mm': None if wr is None else round(wr, 1)})
 
     def report_sighting(self, kind, fwd, left, extra=None):
         if not self.P['publish_events'] or kind not in ('stairs', 'curtain', 'rubble'):
-            return
+            return False
         limit = (self.P['curtain_sighting_range_m'] if kind == 'curtain'
                  else self.P['sighting_range_m'])
         if not 0.0 < fwd <= limit:
-            return
+            return False
         m = self.to_map(fwd, left)
         if m is None:
-            return
+            return False
         self.seen_pub.publish(String(data=json.dumps(
             {'kind': kind, 'x': round(m[0], 2), 'y': round(m[1], 2),
              'rx': round(m[2], 2), 'ry': round(m[3], 2), **(extra or {})})))
+        return True
 
     def send(self, kind, dets):
         now = time.monotonic()
-        if now - self.last_event.get(kind, -1e9) < self.P['cooldown_s']:
+        # A curtain can be detected while turning. Keep confirming it during the approach
+        # so the controller can require a new close-range detection after alignment.
+        confirming_curtain = kind == 'curtain' and self.mission_state == 'APPROACH'
+        if not confirming_curtain and now - self.last_event.get(kind, -1e9) < self.P['cooldown_s']:
             return
         best = max((d for d in dets if d['kind'] == kind), key=lambda d: d['conf'])
         active = self.mission_state in (None, 'EXPLORE', 'GO_TO_EXIT', 'APPROACH')

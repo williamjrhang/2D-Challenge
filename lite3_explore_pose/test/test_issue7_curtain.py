@@ -5,7 +5,10 @@ import math
 from unittest.mock import Mock
 
 import numpy as np
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import TransformStamped
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker
 
 from lite3_explore_pose.crossing import approach_pose, far_side
 from lite3_explore_pose.explorer_node import FrontierExplorer
@@ -57,10 +60,13 @@ def controller():
     m = object.__new__(MissionController)
     m.P = {'approach_merge_m': 0.8, 'portal_return': True, 'portal_max_crossings': 3,
            'approach_min_sightings': 3, 'curtain_min_sightings': 4,
-           'approach_kinds': ['rubble', 'curtain']}
+           'approach_kinds': ['rubble', 'curtain'], 'global_frame': 'map'}
     m.arena = ARENA
     m.portals, m.obstacles = [], []
     m.portal_pub = Mock()
+    m.curtain_marker_pub = Mock()
+    m.get_clock = Mock()
+    m.get_clock().now().to_msg.return_value = Time()
     m.get_logger = Mock()
     m.nav = Mock()
     m.enter = Mock(side_effect=lambda st: setattr(m, 'state', st))
@@ -85,17 +91,171 @@ def test_crossed_curtain_is_recorded_and_crossed_back_when_this_side_is_done():
     assert not m.portal_back()
 
 
-def test_curtain_needs_more_sightings_than_rubble():
+def test_curtain_location_is_saved_before_approach():
     m = controller()
     m.out_of_time = False
     m.robot_xy = Mock(return_value=(0.0, 0.0))
-    for _ in range(3):
-        m.on_obstacle_seen(String(data=json.dumps({'kind': 'curtain', 'x': 2.0, 'y': 0.0,
-                                                   'rx': 0.0, 'ry': 0.0})))
+
+    def sighting(x, y):
+        return String(data=json.dumps({'kind': 'curtain', 'x': x, 'y': y,
+                                       'rx': 0.0, 'ry': 0.0}))
+
+    def pins(msg):
+        return [marker for marker in msg.markers if marker.action == Marker.ADD]
+
+    m.on_obstacle_seen(sighting(2.0, 0.0))
+    log = m.get_logger().info
+    assert any(call.args[0].startswith('CURTAIN: candidate location recorded')
+               for call in log.call_args_list)
+    m.on_obstacle_seen(sighting(2.0, 0.0))
+    m.on_obstacle_seen(sighting(2.0, 0.0))
+    assert not any(call.args[0].startswith('CURTAIN: approach location saved')
+                   for call in log.call_args_list)
+    assert all(not pins(call.args[0])
+               for call in m.curtain_marker_pub.publish.call_args_list)
     assert m.pick_target() is None
-    m.on_obstacle_seen(String(data=json.dumps({'kind': 'curtain', 'x': 2.0, 'y': 0.0,
-                                               'rx': 0.0, 'ry': 0.0})))
-    assert m.pick_target()['kind'] == 'curtain'
+
+    m.on_obstacle_seen(sighting(2.0, 0.0))
+    assert any(call.args[0].startswith('CURTAIN: approach location saved')
+               for call in log.call_args_list)
+    m.enter.assert_not_called()
+    (saved,) = pins(m.curtain_marker_pub.publish.call_args.args[0])
+    assert saved.header.frame_id == 'map'
+    assert (saved.pose.position.x, saved.pose.position.y) == (2.0, 0.0)
+
+    m.on_obstacle_seen(sighting(2.5, 0.5))
+    (updated,) = pins(m.curtain_marker_pub.publish.call_args.args[0])
+    assert (updated.ns, updated.id) == (saved.ns, saved.id)
+    assert (updated.pose.position.x, updated.pose.position.y) == (2.1, 0.1)
+    m.portal_pub.publish.assert_not_called()
+
+    m.do_explore()
+    m.enter.assert_called_once_with('APPROACH')
+    assert (m.target['kind'], m.target['x'], m.target['y']) == ('curtain', 2.1, 0.1)
+
+
+def test_close_curtain_event_requires_completed_alignment():
+    m = controller()
+    m.P['global_frame'] = 'map'
+    m.now_s = Mock(return_value=20.0)
+    m.last_special_end = float('-inf')
+    m.pending_special = None
+    m.state = 'EXPLORE'
+    m.target = None
+    m.arrived_at = None
+    m.approach_yaw = math.radians(179.0)
+    transform = TransformStamped()
+    m.tf_buffer = Mock()
+    m.tf_buffer.lookup_transform.return_value = transform
+    event = String(data='curtain_ahead')
+
+    m.on_event(event)
+    assert m.pending_special is None
+
+    m.state = 'APPROACH'
+    m.target = {'kind': 'curtain'}
+    m.on_event(event)
+    assert m.pending_special is None
+    m.tf_buffer.lookup_transform.assert_not_called()
+
+    m.arrived_at = 19.0
+    off_axis_yaw = math.radians(-146.0)  # 35 degrees away across the +/-180 boundary
+    transform.transform.rotation.z = math.sin(off_axis_yaw / 2.0)
+    transform.transform.rotation.w = math.cos(off_axis_yaw / 2.0)
+    m.on_event(event)
+    assert m.pending_special is None
+
+    aligned_yaw = math.radians(-179.0)
+    transform.transform.rotation.z = math.sin(aligned_yaw / 2.0)
+    transform.transform.rotation.w = math.cos(aligned_yaw / 2.0)
+    m.target = {'kind': 'rubble'}
+    m.on_event(event)
+    assert m.pending_special is None
+
+    m.target = {'kind': 'curtain'}
+    m.on_event(event)
+    assert m.pending_special == 'curtain'
+
+
+def test_curtain_approach_waits_for_new_explorer_pause():
+    m = controller()
+    m.P.update(global_frame='map', approach_timeout_s=30.0, curtain_standoff_m=0.5)
+    m.state = 'APPROACH'
+    m.state_since = 10.0
+    m.now_s = Mock(return_value=12.0)
+    m.explorer_paused_at = 9.0
+    m.target = {'kind': 'curtain', 'x': 1.55, 'y': 0.18, 'rx': 0.2, 'ry': -0.6}
+    m.approach_sent = False
+    m.nav.get_clock().now().to_msg.return_value = Time()
+    m.nav.goToPose.return_value = True
+    m.nav.isTaskComplete.return_value = False
+
+    m.do_approach()
+    assert not m.approach_sent
+    m.nav.goToPose.assert_not_called()
+
+    m.explorer_paused_at = 11.0
+    m.do_approach()
+    m.nav.goToPose.assert_not_called()
+
+    m.nav.isTaskComplete.return_value = True
+    m.do_approach()
+    assert m.approach_sent
+    goal = m.nav.goToPose.call_args.args[0]
+    assert goal.header.frame_id == 'map'
+    assert math.isclose(goal.pose.position.x, 1.05)
+    assert goal.pose.position.y == 0.0
+    assert goal.pose.orientation.w == 1.0
+
+
+def test_explorer_acknowledges_pause_after_nav2_action_finishes():
+    e = object.__new__(FrontierExplorer)
+    e.P = {'coverage_enabled': False, 'dry_run': False}
+    e.robot_pose = Mock(return_value=None)
+    e.localization_pub = Mock()
+    e.grid = None
+    e.now_s = Mock(return_value=11.0)
+    e.deferred_goals = {}
+    e.update_cells = Mock()
+    e.enabled = False
+    e.pose_retry_pending = e.pose_cancel_pending = False
+    e.state = 'NAVIGATE'
+    e.nav = Mock()
+    e.nav.isTaskComplete.return_value = False
+    e.get_logger = Mock()
+    e.warn_idle = Mock()
+    e.publish_cmd = Mock()
+    e.status_pub = Mock()
+
+    e.tick()
+    e.nav.cancelTask.assert_called_once()
+    assert all(call.args[0].data != 'PAUSED' for call in e.status_pub.publish.call_args_list)
+
+    e.nav.isTaskComplete.return_value = True
+    e.tick()
+    assert e.state == 'PAUSED'
+    assert e.status_pub.publish.call_args.args[0].data == 'PAUSED'
+
+
+def test_curtain_confirmation_repeats_during_approach_only(monkeypatch):
+    from lite3_explore_pose import obstacle_detector
+
+    monkeypatch.setattr(obstacle_detector, 'time', Mock(monotonic=Mock(return_value=105.0)))
+    d = object.__new__(obstacle_detector.ObstacleDetector)
+    d.P = {'cooldown_s': 15.0, 'publish_events': True}
+    d.last_event = {'curtain': 100.0, 'rubble': 100.0}
+    d.get_logger = Mock()
+    d.event_pub = Mock()
+    dets = [{'kind': 'curtain', 'conf': 0.4}, {'kind': 'rubble', 'conf': 0.9}]
+
+    d.mission_state = 'EXPLORE'
+    d.send('curtain', dets)
+    d.mission_state = 'APPROACH'
+    d.send('rubble', dets)
+    d.event_pub.publish.assert_not_called()
+
+    d.send('curtain', dets)
+    d.event_pub.publish.assert_called_once_with(String(data='curtain_ahead'))
 
 
 def test_curtain_sighting_flat_wall_rejected_fabric_reported_far_by_sightings_only():

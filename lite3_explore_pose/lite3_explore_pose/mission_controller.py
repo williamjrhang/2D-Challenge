@@ -18,6 +18,7 @@ Inputs (who sends them)
   /special/done          std_msgs/String   "success", "failed" or "stopped_on_rubble"
   /special/state         std_msgs/String   latched crossing phase, including rubble hold
   /exploration/done      std_msgs/Bool     explorer: nothing left to explore
+  /exploration/status    std_msgs/String   explorer: confirms it is idle before curtain approach
   /mission/tasks_done    std_msgs/Bool     semantic map: every mission task found
   /mission/exit_pose     geometry_msgs/PointStamped  perception: where the exit is
 
@@ -27,6 +28,7 @@ Outputs
   /perception/look       std_msgs/Bool     ask perception to look now (investigate)
   /launch_drone          std_msgs/Bool     handoff to the drone team
   /mission/state         std_msgs/String   current mode, for RViz / logging
+  /mission/curtain_locations  visualization_msgs/MarkerArray  saved curtain locations
 
 Every mode has a timeout, so the robot can never get stuck waiting.
 You can test all of this WITHOUT perception, by publishing the inputs by hand
@@ -44,6 +46,7 @@ from rclpy.time import Time
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
 
 from lite3_explore_pose.crossing import STOPPED_ON_RUBBLE, approach_pose, far_side
 from lite3_explore_pose.investigate import LookCooldown, photo_is_stale
@@ -145,6 +148,7 @@ class MissionController(Node):
         self.last_special_reverted = False
         self.create_subscription(String, '/special/report', self.on_special_report, 10)
         self.create_subscription(Bool, '/exploration/done', self.on_explore_done, 10)
+        self.create_subscription(String, '/exploration/status', self.on_explore_status, 1)
         self.create_subscription(Bool, '/mission/tasks_done', self.on_tasks_done, 10)
         self.create_subscription(PointStamped, '/mission/exit_pose', self.on_exit_pose, 10)
         self.localization_ready_at = None
@@ -169,6 +173,8 @@ class MissionController(Node):
         self.look_pub = self.create_publisher(Bool, '/perception/look', 10)
         self.launch_pub = self.create_publisher(Bool, '/launch_drone', 10)
         self.state_pub = self.create_publisher(String, '/mission/state', latched)
+        self.curtain_marker_pub = self.create_publisher(MarkerArray, '/mission/curtain_locations',
+                                                       latched)
 
         self.nav = None
         if self.P['use_nav2']:
@@ -200,9 +206,12 @@ class MissionController(Node):
         self.last_rubble_end = -math.inf
         self.exit_goal_sent = False
         self.obstacles = []          # {kind, x, y, rx, ry, n, status: new | done | failed}
+        self.publish_curtain_locations()
         self.target = None
         self.approach_sent = False
+        self.approach_yaw = None
         self.arrived_at = None
+        self.explorer_paused_at = None
         self.traverse_xy = None
         self.last_xy = None
         self.stable_since = None     # LOCALIZE: ready and jump-free since
@@ -226,6 +235,9 @@ class MissionController(Node):
 
     def on_localization_ready(self, msg):
         self.localization_ready_at = self.now_s() if msg.data else None
+
+    def on_explore_status(self, msg):
+        self.explorer_paused_at = self.now_s() if msg.data == 'PAUSED' else None
 
     def localization_ready(self):
         if not self.P['require_localization_ready']:
@@ -253,6 +265,19 @@ class MissionController(Node):
                 recent = False
             if recent and kind == self.last_special_kind:
                 return
+            if kind == 'curtain' and self.nav is not None:
+                if self.state == 'GO_TO_EXIT' and self.pending_special is None:
+                    target = self.pick_target(kind='curtain')
+                    if target is not None:
+                        self.cancel_nav()
+                        self.target = target
+                        self.enter('APPROACH')
+                if not self.curtain_ready():
+                    self.get_logger().info('Curtain detected, waiting for approach alignment.',
+                                           throttle_duration_sec=2.0)
+                    return
+                if self.pending_special not in (None, 'curtain'):
+                    return
             self.pending_special = kind
             self.get_logger().info(f'Event: {event} -> will traverse {kind}')
         elif event in LOOK_EVENTS:
@@ -380,15 +405,43 @@ class MissionController(Node):
         for o in self.obstacles:
             if (o['kind'] == s['kind']
                     and math.hypot(o['x'] - s['x'], o['y'] - s['y']) < self.P['approach_merge_m']):
-                if o['status'] == 'new':
-                    k = o['n']
-                    o['x'] = (o['x'] * k + s['x']) / (k + 1)
-                    o['y'] = (o['y'] * k + s['y']) / (k + 1)
-                    o['rx'], o['ry'] = s['rx'], s['ry']
-                    o['n'] = k + 1
-                return
-        self.obstacles.append({**s, 'n': 1, 'status': 'new'})
-        self.get_logger().info(f'Obstacle seen: {s["kind"]} at ({s["x"]:.2f}, {s["y"]:.2f})')
+                if o['status'] != 'new':
+                    return
+                k = o['n']
+                o['x'] = (o['x'] * k + s['x']) / (k + 1)
+                o['y'] = (o['y'] * k + s['y']) / (k + 1)
+                o['rx'], o['ry'] = s['rx'], s['ry']
+                o['n'] = k + 1
+                break
+        else:
+            o = {**s, 'n': 1, 'status': 'new'}
+            self.obstacles.append(o)
+            if o['kind'] == 'curtain':
+                self.get_logger().info(f'CURTAIN: candidate location recorded in '
+                                       f'{self.P["global_frame"]} at ({o["x"]:.2f}, {o["y"]:.2f})')
+            else:
+                self.get_logger().info(f'Obstacle seen: {o["kind"]} at ({o["x"]:.2f}, {o["y"]:.2f})')
+        if o['kind'] == 'curtain' and o['n'] >= self.min_sightings('curtain'):
+            if o['n'] == self.min_sightings('curtain'):
+                self.get_logger().info(f'CURTAIN: approach location saved in {self.P["global_frame"]} '
+                                       f'at ({o["x"]:.2f}, {o["y"]:.2f}) after {o["n"]} sightings')
+            self.publish_curtain_locations()
+
+    def publish_curtain_locations(self):
+        markers = [Marker(action=Marker.DELETEALL)]
+        for index, obstacle in enumerate(self.obstacles):
+            if obstacle['kind'] != 'curtain' or obstacle['n'] < self.min_sightings('curtain'):
+                continue
+            marker = Marker(ns='curtains', id=index, type=Marker.CYLINDER, action=Marker.ADD)
+            marker.header.frame_id = self.P['global_frame']
+            marker.pose.position.x, marker.pose.position.y = obstacle['x'], obstacle['y']
+            marker.pose.position.z = 0.15
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = marker.scale.y = 0.20
+            marker.scale.z = 0.30
+            marker.color.r, marker.color.g, marker.color.b, marker.color.a = 0.95, 0.38, 0.08, 1.0
+            markers.append(marker)
+        self.curtain_marker_pub.publish(MarkerArray(markers=markers))
 
     def robot_xy(self):
         try:
@@ -401,12 +454,13 @@ class MissionController(Node):
         return (self.P.get('curtain_min_sightings', self.P['approach_min_sightings'])
                 if kind == 'curtain' else self.P['approach_min_sightings'])
 
-    def pick_target(self):
-        if self.nav is None or self.out_of_time:
+    def pick_target(self, kind=None):
+        if self.nav is None or (self.out_of_time and kind is None):
             return None
         here = self.robot_xy()
         cands = [o for o in self.obstacles
-                 if o['status'] == 'new' and o['n'] >= self.min_sightings(o['kind'])]
+                 if o['status'] == 'new' and (kind is None or o['kind'] == kind)
+                 and o['n'] >= self.min_sightings(o['kind'])]
         if not cands or here is None:
             return None
         return min(cands, key=lambda o: math.hypot(o['x'] - here[0], o['y'] - here[1]))
@@ -444,6 +498,7 @@ class MissionController(Node):
             self.special_pub.publish(String(data=self.current_special))
         elif state == 'APPROACH':
             self.approach_sent = False
+            self.approach_yaw = None
             self.arrived_at = None
         elif state == 'INVESTIGATE':
             self.look_done = False
@@ -500,7 +555,12 @@ class MissionController(Node):
             self.last_xy = None
             self.stable_since = None             # LOCALIZE: needs a full stable period
             self.pending_special = None
+            lost_curtain_locations = any(o['kind'] == 'curtain' and o['status'] == 'new'
+                                         and o['n'] >= self.min_sightings('curtain')
+                                         for o in self.obstacles)
             self.obstacles = [o for o in self.obstacles if o['status'] != 'new']
+            if lost_curtain_locations:
+                self.publish_curtain_locations()
             if self.state in ('TRAVERSE', 'APPROACH', 'GO_TO_EXIT'):
                 self.stop_for_localization(f'Localization unavailable during {self.state}')
             else:
@@ -520,10 +580,12 @@ class MissionController(Node):
 
         # Priority 1 and 2 can interrupt EXPLORE (and GO_TO_EXIT, APPROACH).
         if self.state in ('EXPLORE', 'GO_TO_EXIT', 'APPROACH'):
-            if self.pending_special:
-                self.current_special = self.pending_special
-                self.pending_special = None
-                self.cancel_nav()
+            pending = self.pending_special
+            self.pending_special = None
+            if pending and (pending != 'curtain' or self.nav is None or self.curtain_ready()):
+                self.current_special = pending
+                if pending != 'curtain':     # the curtain approach has already finished
+                    self.cancel_nav()
                 self.enter('TRAVERSE')
                 return
             if self.pending_look and self.state == 'EXPLORE':
@@ -628,13 +690,35 @@ class MissionController(Node):
             return True
         return False
 
+    def curtain_ready(self):
+        return (self.state == 'APPROACH' and self.target is not None
+                and self.target['kind'] == 'curtain' and self.arrived_at is not None
+                and self.curtain_aligned())
+
+    def curtain_aligned(self):
+        if self.approach_yaw is None:
+            return False
+        try:
+            t = self.tf_buffer.lookup_transform(self.P['global_frame'], 'base_link', Time())
+        except TransformException:
+            return False
+        q = t.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        return abs(math.remainder(yaw - self.approach_yaw, math.tau)) <= math.radians(15)
+
     def do_approach(self):
         from nav2_simple_commander.robot_navigator import TaskResult
         o = self.target
         if self.time_in_state() < 1.0:        # let the explorer cancel its own goal first
             return
+        curtain = o['kind'] == 'curtain'
         if not self.approach_sent:
-            curtain = o['kind'] == 'curtain'
+            if curtain and (self.explorer_paused_at is None
+                            or self.explorer_paused_at < self.state_since
+                            or not self.nav.isTaskComplete()):
+                if self.time_in_state() > self.P['approach_timeout_s']:
+                    self.approach_failed('Nav2 did not become idle for the curtain approach')
+                return
             sx = (self.P.get('curtain_standoff_m', 0.5) if curtain
                   else self.P['approach_standoff_m'])
             # direction we first saw it from; curtain: square to the doorway (issue 7)
@@ -650,6 +734,7 @@ class MissionController(Node):
             if self.nav.goToPose(goal) is False:
                 return self.approach_failed('Nav2 rejected the goal')
             self.approach_sent = True
+            self.approach_yaw = yaw if curtain else None
             self.get_logger().info(
                 f'Nav2 accepted approach to {o["kind"]} at '
                 f'({goal.pose.position.x:.2f}, {goal.pose.position.y:.2f})')
@@ -659,6 +744,8 @@ class MissionController(Node):
                 result = self.nav.getResult()
                 if result != TaskResult.SUCCEEDED:
                     return self.approach_failed(f'Nav2 result {result}')
+                if curtain and not self.curtain_aligned():
+                    return self.approach_failed('robot heading was outside the curtain alignment tolerance')
                 self.arrived_at = self.now_s()
                 self.get_logger().info(f'At the {o["kind"]}, waiting for the close-range check.')
             elif self.time_in_state() > self.P['approach_timeout_s']:
@@ -676,7 +763,7 @@ class MissionController(Node):
             self.portals[self.target['portal']]['status'] = 'failed'
         self.target['status'] = 'failed'
         self.target = None
-        self.enter('EXPLORE')
+        self.enter('GO_TO_EXIT' if self.out_of_time else 'EXPLORE')
 
     def do_investigate(self):
         """Stand still -> look -> (stale photo? look again) -> (QR? until placed) -> EXPLORE.

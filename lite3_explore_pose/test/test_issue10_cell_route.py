@@ -1,8 +1,13 @@
 """Issue 10: BFS over the cell graph, routes through doorway midpoints and cell centres,
 centring rule, grid-alignment estimate on synthetic maps."""
 import math
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
+import pytest
+from builtin_interfaces.msg import Time
+from nav2_simple_commander.robot_navigator import TaskResult
 
 from lite3_explore_pose.cell_route import (bfs, grid_alignment, needs_centring, neighbours,
                                            route_poses)
@@ -72,26 +77,37 @@ def test_grid_alignment_detects_offset_and_rotation():
     assert abs(est['dx_m'] - 0.08) < 0.02 and abs(est['dy_m'] + 0.06) < 0.02
 
 
-def test_explorer_routes_through_cells_and_centres_first():
-    from types import SimpleNamespace
-    from unittest.mock import Mock
+def make_explorer(walls=WALLS, *, grid_explore=False):
     from lite3_explore_pose.explorer_node import FrontierExplorer
     e = object.__new__(FrontierExplorer)
     e.P = {'cell_routing': True, 'route_kinds': ['cell'], 'centre_tolerance_m': 0.15,
            'centre_heading_deg': 15.0, 'global_frame': 'map', 'time_limit_base_s': 20.0,
-           'time_limit_per_m_s': 8.0, 'no_backup_after_crossing_s': 0.0}
+           'time_limit_per_m_s': 8.0, 'no_backup_after_crossing_s': 0.0,
+           'grid_explore': grid_explore, 'dry_run': False, 'grid_max_attempts': 2,
+           'blacklist_radius_m': 0.30, 'cell_visit_edge_margin_m': 0.10,
+           'pose_goal_tolerance_m': 0.35, 'pose_result_wait_s': 2.0}
     e.cells = G
-    e.cell_info = {c: SimpleNamespace(state='free', walls=list(w)) for c, w in WALLS.items()}
+    e.cell_info = {
+        cell: SimpleNamespace(state='free', walls=list(sides), centre=G.centre(cell),
+                              goal=G.centre(cell))
+        for cell, sides in walls.items()
+    }
     e.visited_cells, e.wall_memory = set(), {}
+    e.cell_attempts, e.deferred_goals = {}, {}
     e.nav = Mock()
-    from builtin_interfaces.msg import Time
     e.nav.get_clock.return_value.now.return_value.to_msg.return_value = Time()
     e.nav.goThroughPoses.return_value = True
     e.nav.goToPose.return_value = True
     e.pose_health = Mock(pose_stamp=1, odom_stamp=1)
     e.now_s = Mock(return_value=10.0)
     e.get_logger = Mock()
+    e.set_state = Mock()
     e.last_pose = (0.0, 0.0, math.pi / 2)            # centred, facing the (0,1) doorway
+    return e
+
+
+def test_explorer_routes_through_cells_and_centres_first():
+    e = make_explorer()
     assert e.send_goal(G.centre((1, 1)), (0.0, 0.0), is_frontier=False, kind='cell')
     poses = e.nav.goThroughPoses.call_args.args[0]
     assert [(round(p.pose.position.x, 2), round(p.pose.position.y, 2)) for p in poses] == [
@@ -111,4 +127,77 @@ def test_explorer_routes_through_cells_and_centres_first():
     e.nav.reset_mock()
     e.send_goal((5.0, 5.0), (0.0, 0.0), is_frontier=False, kind='cell')
     e.nav.goToPose.assert_called_once()
+    e.nav.goThroughPoses.assert_not_called()
+
+
+def test_grid_uses_visited_hop_and_skips_disconnected_cell():
+    walls = {(0, 0): {'+x'}, (0, 1): set(), (1, 1): {'-y'}, (1, 0): {'-x', '+y'}}
+    e = make_explorer(walls, grid_explore=True)
+    e.visited_cells = {(0, 0), (0, 1)}
+    e.send_goal = Mock(return_value=True)
+
+    assert e.start_cell(e.last_pose)
+
+    assert e.send_goal.call_args.args[0] == G.centre((0, 1))
+    e.set_state.assert_called_once_with('NAVIGATE')
+
+
+def test_grid_prefers_shorter_open_route_over_geometrically_nearer_cell():
+    walls = {(0, 0): {'+x'}, (0, 1): set(), (1, 1): set(), (1, 0): {'-x'},
+             (0, -1): set(), (0, -2): set()}
+    e = make_explorer(walls, grid_explore=True)
+    e.visited_cells = {(0, 0), (0, 1), (1, 1), (0, -1)}
+    e.send_goal = Mock(return_value=True)
+
+    assert e.start_cell(e.last_pose)
+
+    assert e.send_goal.call_args.args[0] == G.centre((0, -1))
+
+
+def test_grid_dispatches_only_the_adjacent_cell():
+    e = make_explorer(grid_explore=True)
+
+    assert e.send_goal(G.centre((0, 1)), e.last_pose[:2], is_frontier=False, kind='cell')
+
+    e.nav.goToPose.assert_called_once()
+    goal = e.nav.goToPose.call_args.args[0].pose
+    assert (goal.position.x, goal.position.y) == G.centre((0, 1))
+    e.nav.goThroughPoses.assert_not_called()
+
+
+def test_grid_rejects_a_direct_goal_without_an_open_shared_side():
+    e = make_explorer(grid_explore=True)
+
+    for cell in [(1, 0), (1, 1)]:
+        assert not e.send_goal(G.centre(cell), e.last_pose[:2], is_frontier=False, kind='cell')
+
+    e.nav.goToPose.assert_not_called()
+    e.nav.goThroughPoses.assert_not_called()
+
+
+@pytest.mark.parametrize('result', [TaskResult.SUCCEEDED, TaskResult.FAILED])
+def test_grid_waits_for_successful_centring_before_leaving(result):
+    e = make_explorer(grid_explore=True)
+    e.last_pose = (0.3, -0.1, 0.0)
+    e.start_recovery = Mock()
+
+    assert e.send_goal(G.centre((0, 1)), e.last_pose[:2], is_frontier=False, kind='cell')
+    e.nav.goToPose.assert_called_once()
+    centre = e.nav.goToPose.call_args.args[0].pose
+    assert (centre.position.x, centre.position.y) == G.centre((0, 0))
+    assert math.isclose(centre.orientation.z, math.sin(math.pi / 4))
+
+    e.nav.isTaskComplete.return_value = True
+    e.nav.getResult.return_value = result
+    e.pose_health.pose_stamp = e.pose_health.odom_stamp = 2
+    e.do_navigate((0.0, 0.0, math.pi / 2))
+
+    if result == TaskResult.SUCCEEDED:
+        assert e.nav.goToPose.call_count == 2
+        neighbour = e.nav.goToPose.call_args.args[0].pose
+        assert (neighbour.position.x, neighbour.position.y) == G.centre((0, 1))
+        e.start_recovery.assert_not_called()
+    else:
+        e.nav.goToPose.assert_called_once()
+        e.start_recovery.assert_called_once()
     e.nav.goThroughPoses.assert_not_called()

@@ -49,7 +49,8 @@ from lite3_explore_pose.frontiers import (
 import re  # [RECORD]
 
 from lite3_explore_pose.frontier_record import FrontierRecord, record_path
-from lite3_explore_pose.cell_route import bfs, grid_alignment, needs_centring, route_poses
+from lite3_explore_pose.cell_route import (bfs, grid_alignment, needs_centring, neighbours,
+                                           route_poses)
 from lite3_explore_pose.crossing import far_side
 from lite3_explore_pose.investigate import photo_is_stale
 from lite3_explore_pose.frontier_goals import (
@@ -172,7 +173,7 @@ class FrontierExplorer(Node):
         p('room_dwell_s', 2.5)            # still time per view (QR reader 3 Hz, VLM 1 photo)
         p('room_max_attempts', 2)
         p('cell_overlay', True)           # RViz /exploration/cells: cells, walls, rooms
-        # [GRID] visit arena cells one by one (nearest free unvisited cell centre first) instead
+        # [GRID] take one cell step toward the nearest reachable unvisited cell instead
         # of chasing frontiers; frontiers only uncover cells that are still unknown. Frontiers,
         # coverage and cells are limited to grid_bounds_cells (arena cells relative to the start
         # cell: [i_min, j_min, i_max, j_max], +i forward, +j left).
@@ -353,7 +354,7 @@ class FrontierExplorer(Node):
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/perception/scene', self.on_scene, 10)
         self.last_crossing_end = None     # [NOBACKUP] issue 8
-        self.route_pending = None         # [ROUTE] issue 10: poses to send after centring
+        self.route_pending = None         # [ROUTE] centring pose and route to send afterward
         self.last_pose = None
         self.last_grid_check = None
         self.create_subscription(String, '/special/report', self.on_special_report, 10)
@@ -597,11 +598,12 @@ class FrontierExplorer(Node):
         cmd.angular.z = float(angular)
         self.cmd_pub.publish(cmd)
 
-    def set_state(self, state):
+    def set_state(self, state, *, publish_status=True):
         if state != self.state:
             self.get_logger().info(f'State: {self.state} -> {state}')
         self.state = state
-        self.status_pub.publish(String(data=state))
+        if publish_status:
+            self.status_pub.publish(String(data=state))
 
     def blacklist_goal(self, why):
         # [COVER] coverage goals are blacklisted the same way as frontier goals
@@ -646,9 +648,23 @@ class FrontierExplorer(Node):
         # Humble's commander retains feedback across actions until new feedback arrives.
         self.nav.feedback = None
         self.route_pending = None
+        grid_step = self.P.get('grid_explore') and self.goal_kind == 'cell'
+        if grid_step:
+            start = self.cells.cell_of(*robot_xy)
+            destination = self.cells.cell_of(*xy)
+            if start != destination and destination not in neighbours(start, self.route_walls()):
+                why = f'no open grid edge from {start} to {destination}'
+                if retry:
+                    self.defer_pose_goal(why)
+                else:
+                    self.get_logger().warn(f'Grid goal skipped: {why}')
+                return False
         route = self.plan_route(xy, yaw if explicit_yaw else None)     # [ROUTE] issue 10
         if route is not None:
             centre, poses, cells_path = route
+            if grid_step:
+                self.goal_yaw = poses[0][2]   # keep the arena heading, even for a goal off-centre
+                poses = [(*poses[-1][:2], self.goal_yaw)]
             distance = sum(math.dist(a[:2], b[:2]) for a, b in
                            zip([(robot_xy[0], robot_xy[1], 0.0)] + poses, poses))
             self.goal_time_limit = (self.P['time_limit_base_s']
@@ -656,8 +672,10 @@ class FrontierExplorer(Node):
             self.get_logger().info(f'Route via cells {cells_path}'
                                    + (' (centring first)' if centre is not None else ''))
             if centre is not None:
-                self.route_pending = poses
+                self.route_pending = centre, poses
                 accepted = self.go_to(self.pose_msg(*centre))
+            elif grid_step:
+                accepted = self.go_to(self.pose_msg(*poses[0]))
             else:
                 accepted = self.go_through([self.pose_msg(*p) for p in poses])
         else:
@@ -1054,14 +1072,21 @@ class FrontierExplorer(Node):
             if self.pose_retry_pending:
                 self.release_goal_attempt()
                 self.pose_retry_pending = False
-            if self.state in ('NAVIGATE', 'SPIN', 'ROOM_LOOK') and not self.P['dry_run']:
+            if (self.state in ('NAVIGATE', 'SPIN', 'ROOM_LOOK') and not self.P['dry_run']
+                    and not self.pose_cancel_pending):
                 self.get_logger().info(f'Cancelling Nav2 {self.state.lower()} for exploration pause.')
                 self.nav.cancelTask()
+                self.pose_cancel_pending = True
                 self.route_pending = None
             if self.state in ('SPIN', 'RECOVER', 'HOLD', 'ROOM_LOOK'):  # [HOLD] stop on pause too
                 self.publish_cmd()
+            # A cancel request can be acknowledged before the Nav2 action finishes.
+            idle = self.P['dry_run'] or self.nav.isTaskComplete()
+            self.pose_cancel_pending = not idle
             if self.state != 'DONE':
-                self.set_state('PAUSED')
+                self.set_state('PAUSED', publish_status=idle)
+            elif idle:
+                self.status_pub.publish(String(data='PAUSED'))
             self.warn_idle('paused by mission_controller (/exploration/enable = false)')
             return
         if self.state == 'PAUSED':
@@ -1252,12 +1277,33 @@ class FrontierExplorer(Node):
     def do_navigate(self, pose):
         now = self.now_s()
 
-        # 0. [ROUTE] centring step done (or failed: not a reason to give up): the route
+        # 0. [ROUTE] centring step is complete. A grid move needs a confirmed starting cell.
         if getattr(self, 'route_pending', None) is not None and self.nav.isTaskComplete():
-            poses, self.route_pending = self.route_pending, None
-            self.get_logger().info(f'Centred in the cell ({self.nav.getResult()}), going '
-                                   f'through {len(poses)} waypoints')
-            if self.go_through([self.pose_msg(*p) for p in poses]) is False:
+            (centre, poses), self.route_pending = self.route_pending, None
+            result = self.nav.getResult()
+            if self.P.get('grid_explore') and self.goal_kind == 'cell':
+                start = self.cells.cell_of(*centre[:2])
+                if (result != TaskResult.SUCCEEDED or self.visit_cell(pose) != start
+                        or needs_centring(pose, centre[:2], centre[2],
+                                          self.P['pose_goal_tolerance_m'],
+                                          self.P['centre_heading_deg'])):
+                    self.start_recovery(f'could not confirm centring in grid cell {start}')
+                    return
+                destination = self.cells.cell_of(*poses[0][:2])
+                if destination not in neighbours(start, self.route_walls()):
+                    self.start_recovery(f'grid edge from {start} to {destination} closed')
+                    return
+                self.get_logger().info(f'Centred in grid cell {start}, going to {destination}')
+                self.nav.feedback = None
+                self.goal_pose_stamp = self.pose_health.pose_stamp
+                self.goal_odom_stamp = self.pose_health.odom_stamp
+                self.goal_start = now
+                accepted = self.go_to(self.pose_msg(*poses[0]))
+            else:
+                self.get_logger().info(f'Centred in the cell ({result}), going '
+                                       f'through {len(poses)} waypoints')
+                accepted = self.go_through([self.pose_msg(*p) for p in poses])
+            if accepted is False:
                 self.start_recovery('Nav2 rejected the route')
                 return
             self.window_remaining = None
@@ -1290,6 +1336,8 @@ class FrontierExplorer(Node):
                     return
                 cell = self.cells.cell_of(*self.goal_xy)
                 self.record_visit(cell)
+                if self.P.get('grid_explore'):
+                    self.cell_attempts.pop(cell, None)
                 self.failures_in_a_row = 0
                 self.last_good_xy = self.goal_xy
                 self.set_state('SELECT')
@@ -1731,25 +1779,44 @@ class FrontierExplorer(Node):
         return [r for _, r in sorted(out, key=lambda t: t[0])]
 
     def start_cell(self, pose):
-        """[GRID] Drive to the nearest free, unvisited cell inside the bounds."""
+        """[GRID] Take one step toward a reachable unvisited cell."""
         if not self.P['grid_explore'] or self.P['dry_run'] or pose is None or not self.cell_info:
             return False
         here = self.cells.cell_of(pose[0], pose[1])
-        todo = []
-        for cell, ci in self.cell_info.items():
-            if (ci.state != 'free' or ci.goal is None or cell in self.visited_cells
-                    or cell == here and self.cells.in_visit_region(cell, pose[0], pose[1])
-                    or not self.cells.in_bounds(cell)
-                    or self.is_deferred(ci.goal)
-                    or self.cell_attempts.get(cell, 0) >= self.P['grid_max_attempts']):
+        max_attempts = self.P['grid_max_attempts']
+        walls = self.route_walls()
+        goals = {}
+        for cell in list(walls):
+            ci = self.cell_info.get(cell)
+            goal = ci.goal if ci is not None else None
+            if goal is None and cell in self.visited_cells:
+                goal = self.cells.centre(cell)
+            if not self.cells.in_bounds(cell):
+                del walls[cell]
+            elif (goal is not None and self.cell_attempts.get(cell, 0) < max_attempts
+                  and not self.is_deferred(goal)):
+                goals[cell] = goal
+            elif cell != here:
+                del walls[cell]
+        routes = []
+        for cell, goal in goals.items():
+            if (cell in self.visited_cells or
+                    (cell == here and self.cells.in_visit_region(cell, *pose[:2]))):
                 continue
-            todo.append((math.hypot(ci.goal[0] - pose[0], ci.goal[1] - pose[1]), cell, ci))
-        for _, cell, ci in sorted(todo):
-            self.cell_attempts[cell] = self.cell_attempts.get(cell, 0) + 1
+            path = bfs(here, cell, walls)
+            if path:
+                next_cell = path[1] if len(path) > 1 else here
+                routes.append((len(path), math.dist(goal, pose[:2]), cell, next_cell))
+        tried = set()
+        for _, _, destination, next_cell in sorted(routes):
+            if next_cell in tried:
+                continue
+            tried.add(next_cell)
+            self.cell_attempts[next_cell] = self.cell_attempts.get(next_cell, 0) + 1
             self.get_logger().info(
-                f'GRID: going to cell {cell} ({len(todo)} unvisited free cells, attempt '
-                f'{self.cell_attempts[cell]}/{self.P["grid_max_attempts"]})')
-            if self.send_goal(ci.goal, pose[:2], is_frontier=False, kind='cell'):
+                f'GRID: step {here} -> {next_cell} toward {destination} '
+                f'(attempt {self.cell_attempts[next_cell]}/{max_attempts})')
+            if self.send_goal(goals[next_cell], pose[:2], is_frontier=False, kind='cell'):
                 self.set_state('NAVIGATE')
                 return True
         return False
