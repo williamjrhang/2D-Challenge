@@ -2,17 +2,18 @@
 """Special obstacle node: crosses stairs, rubble (uneven terrain) and curtains.
 
 The mission controller starts it by publishing on /special/start:
-    "stairs", "rubble" or "curtain"   (or "stop" to abort)
-It answers on /special/done with "success" or "failed".
+    "stairs", "rubble", "potholes" or "curtain"   (or "stop" to abort)
+It answers on /special/done with "success", "failed" or "stopped_on_rubble".
 
-Every crossing follows the same steps:
+Crossing phases:
     SETTLE  stop for a moment (robot steady, everyone sees it's switching)
     GAIT    (optional) switch to a special gait, if you set a gait code
     CROSS   walk STRAIGHT, slowly, holding the starting heading
             - stairs:  done when the robot tilted up (on the steps) and is level again
             - rubble:  done after walking rubble_distance_m
             - curtain: done after walking curtain_distance_m
-    ABORT   (if tilted too much or not moving) stop, back off slowly -> "failed"
+    ABORT   for non-rubble crossings, stop or back off slowly -> "failed"
+    HOLD_RUBBLE  stop in the terrain gait until manual recovery
     FINISH  stop, restore the normal gait, report
 
 Nav2 is NOT used while crossing: this node drives /cmd_vel directly, like
@@ -25,14 +26,15 @@ robot_goto_goal.py from Lab 3. The explorer is paused by the mission controller.
 import json
 import math
 
-from lite3_explore_pose.crossing import (gait_after, odom_jumped, stairs_exit, verify_result,
-                                         walked_enough)
+from lite3_explore_pose.crossing import (STOPPED_ON_RUBBLE, gait_after, odom_jumped, stairs_exit,
+                                         verify_result, walked_enough)
 from lite3_explore_pose.gait import (GAIT_COMMAND_QOS, GAIT_NAMES, GaitState, GaitTable,
                                      default_gait_file, send_gait)
 
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import FloatingPointRange, ParameterDescriptor
 from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -140,7 +142,13 @@ class SpecialObstacles(Node):
         p('tail_m', 0.45)                    # base_link -> robot tail (~0.3) + margin
 
         # Safety
-        p('max_tilt_deg', 25.0)              # roll or pitch beyond this -> abort
+        p('max_tilt_deg', 25.0)              # shared tilt limit, also the roll limit on rubble
+        # Keep the legacy default when a params file omits the rubble-specific limit.
+        self.declare_parameter(
+            'rubble_max_pitch_deg', 25.0,
+            descriptor=ParameterDescriptor(
+                description='Maximum absolute pitch during a rubble crossing (degrees)',
+                floating_point_range=[FloatingPointRange(from_value=25.0, to_value=35.0)]))
         p('stairs_max_pitch_deg', 45.0)      # 22/11: a step briefly pitched 40 deg and aborted
         p('tilt_hold_s', 0.5)                # tilt must stay over the limit this long to abort
         # 22/11: AI mode climbed to the platform, then stood still at the top edge (needs a
@@ -223,11 +231,11 @@ class SpecialObstacles(Node):
         # {kind, result, verify_reverts, t}
         self.report_pub = self.create_publisher(String, '/special/report', 10)
         self.verify_reverts = 0
-        self.state_pub = self.create_publisher(String, '/special/state', 10)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.state_pub = self.create_publisher(String, '/special/state', latched)
         self.gait_pub = None
         if MotionSimpleCMD is not None:
             self.gait_pub = self.create_publisher(MotionSimpleCMD, '/simple_cmd', GAIT_COMMAND_QOS)
-        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.gait_cur_pub = self.create_publisher(String, '/gait/current', latched)
         self.gait_cur_pub.publish(String(data=self.gait.current))
         # Other nodes (explorer at start) ask for a gait here instead of sending codes.
@@ -271,9 +279,16 @@ class SpecialObstacles(Node):
 
     def on_start(self, msg):
         cmd = msg.data.strip()
+        if self.phase == 'HOLD_RUBBLE':
+            if cmd != 'stop':
+                self.get_logger().warn(f'{cmd}: rubble hold is active', throttle_duration_sec=2.0)
+            return
         if cmd == 'stop':
             if self.phase != 'IDLE':
                 self.get_logger().warn('Stop requested by mission controller.')
+                if self.kind == 'rubble':
+                    self.finish('failed')
+                    return
                 self.stop_robot()
                 if self.in_ai and self.kind == 'stairs' and self.phase != 'RESTORE':
                     # 22/11 lesson: never leave AI mode ON the stairs, also not on 'stop'
@@ -491,7 +506,10 @@ class SpecialObstacles(Node):
 
     def abort(self, reason):
         self.get_logger().warn(f'{self.kind}: ABORT ({reason})')
-        self.set_phase('ABORT')
+        if self.kind == 'rubble':
+            self.finish('failed')
+        else:
+            self.set_phase('ABORT')
 
     def stairs_stuck(self, why):
         """Stopped ON the stairs: AI stays on, robot still, everybody is told."""
@@ -526,6 +544,13 @@ class SpecialObstacles(Node):
 
     def finish(self, result):
         self.stop_robot()
+        if result == 'failed' and self.kind == 'rubble':
+            if self.phase == 'VERIFY':
+                self.set_gait(self.verify_prev_gait, 'rubble: hold position')
+            self.get_logger().error(f'rubble: stopped in {self.gait.current} gait. Use the '
+                                    'joystick to walk it clear before restarting autonomy.')
+            self.report('failed', rubble_hold=True)
+            return
         if self.in_ai and self.kind == 'stairs' and result == 'failed':
             # 22/11: an abort on top of the stairs switched AI off -> normal gait on the steps.
             # Stay in AI mode and stand still; a person finishes with the joystick.
@@ -545,7 +570,8 @@ class SpecialObstacles(Node):
                 and self.P['verify_enabled'] and self.gait_code_for(self.kind)):
             self.start_verify()
             return
-        self.restore_gait()
+        if self.phase != 'VERIFY':  # VERIFY already selected flat
+            self.restore_gait()
         self.report(result)
 
     # ================= issue 8: VERIFY after switching back to flat =================
@@ -591,7 +617,7 @@ class SpecialObstacles(Node):
         if self.verify_reverts >= self.P['verify_max_retries']:
             self.get_logger().error(msg + f': still on the {self.kind} after '
                                     f'{self.verify_reverts} retries -> failed')
-            self.report('failed')
+            self.finish('failed')
             return
         self.verify_reverts += 1
         self.get_logger().warn(msg + f': back to {self.verify_prev_gait}, CROSS '
@@ -631,15 +657,15 @@ class SpecialObstacles(Node):
             else:
                 self.report(self.pending_result)
 
-    def report(self, result):
+    def report(self, result, *, rubble_hold=False):
         self.get_logger().info(f'{self.kind}: {result}'
                                + (f' ({self.verify_reverts} VERIFY reverts)'
                                   if getattr(self, 'verify_reverts', 0) else ''))
         self.report_pub.publish(String(data=json.dumps(
             {'kind': self.kind, 'result': result,
              'verify_reverts': getattr(self, 'verify_reverts', 0), 't': self.now_s()})))
-        self.done_pub.publish(String(data=result))
-        self.set_phase('IDLE')
+        self.set_phase('HOLD_RUBBLE' if rubble_hold else 'IDLE')
+        self.done_pub.publish(String(data=STOPPED_ON_RUBBLE if rubble_hold else result))
 
     # ================= main loop =================
 
@@ -649,12 +675,16 @@ class SpecialObstacles(Node):
 
         # Safety first, in every phase except backing off
         if self.phase in ('SETTLE', 'GAIT', 'CROSS'):
-            limit = math.radians(self.P['curtain_max_tilt_deg'] if self.kind == 'curtain'
-                                 else self.P['stairs_max_roll_deg'] if self.kind == 'stairs'
-                                 else self.P['max_tilt_deg'])
-            pitch_limit = (math.radians(self.P['stairs_max_pitch_deg'])
-                           if self.kind == 'stairs' else limit)
-            over = abs(self.roll) > limit or abs(self.pitch) > pitch_limit
+            roll_limit = pitch_limit = self.P['max_tilt_deg']
+            if self.kind == 'stairs':
+                roll_limit = self.P['stairs_max_roll_deg']
+                pitch_limit = self.P['stairs_max_pitch_deg']
+            elif self.kind == 'curtain':
+                roll_limit = pitch_limit = self.P['curtain_max_tilt_deg']
+            elif self.kind == 'rubble':
+                pitch_limit = self.get_parameter('rubble_max_pitch_deg').value
+            over = (abs(self.roll) > math.radians(roll_limit)
+                    or abs(self.pitch) > math.radians(pitch_limit))
             if not over:
                 self.tilt_since = None
             elif getattr(self, 'tilt_since', None) is None:
@@ -890,6 +920,9 @@ class SpecialObstacles(Node):
             self.drive(-abs(self.P['backoff_speed']))
         else:
             self.finish('failed')
+
+    def do_hold_rubble(self):
+        self.stop_robot()
 
     def do_idle(self):
         pass

@@ -1,0 +1,82 @@
+
+=== Lite3 mission started 2026-11-26T04:26:00+00:00 (live=true, role=all) ===
+[reporter] [INFO] [1795667161.195771819] [reporter]: Mission M01: "object medical_kit" -> {'task_type': 'object', 'target': 'medical_kit'}
+[reporter] [INFO] [1795667161.196512623] [reporter]: Mission M02: "hazard high_voltage" -> {'task_type': 'hazard', 'target': 'high_voltage'}
+[reporter] [INFO] [1795667161.197088078] [reporter]: Mission M03: "survivor kitchen" -> {'task_type': 'survivor', 'target': 'kitchen'}
+[reporter] [INFO] [1795667161.197625610] [reporter]: Mission M04: "qr" -> {'task_type': 'qr', 'target': None}
+[reporter] [INFO] [1795667161.198162307] [reporter]: Mission M05: "survivor from_qr" -> {'task_type': 'survivor', 'target': 'from_qr'}
+[special_obstacles] [INFO] [1795667161.328936862] [special_obstacles]: Gait table /home/user/challenge_ws/install/lite3_explore_pose/share/lite3_explore_pose/config/gait.yaml: flat=0x21010300, high_step=0x21010407, ai_enter=0x21010528, ai_exit=0x2101052b, auto=0x21010c03, manual=0x21010c02; terrain {'rubble': 'high_step', 'potholes': 'high_step'}
+[special_obstacles] [INFO] [1795667161.384667891] [special_obstacles]: Special obstacle node ready (waiting on /special/start)
+[explorer] [INFO] [1795667161.767482174] [frontier_explorer]: bounds off: large-map guard +/- 6.0 m around the start
+[explorer] [INFO] [1795667161.767892176] [frontier_explorer]: GRID explore: cells [0, -2, 5, 2] -> map box [-1.15, -3.19, 6.25, 3.19]
+[reporter] [INFO] [1795667161.836129945] [reporter]: Reporter ready: DRY RUN (log only) as group05_Gp05. Log: /home/user/challenge_ws/reports/run_20261126_042601.jsonl
+[explorer] [INFO] [1795667162.330020807] [frontier_explorer]: Waiting for Nav2 (bt_navigator) to be active...
+[mission_controller] [WARN] [1795667162.561697562] [mission_controller]: final_cell_centre not set: robot will explore and then stop where it is (no drive to a final cell).
+[mission_controller] [INFO] [1795667162.565701332] [mission_controller]: MODE: EXPLORE -> EXPLORE
+[mission_controller] [INFO] [1795667162.765570369] [mission_controller]: Waiting for explorer localization readiness before mission motion.
+[explorer] [INFO] [1795667164.613185047] [frontier_explorer]: Nav2 is active.
+[explorer] [INFO] [1795667164.613940623] [frontier_explorer]: Frontier explorer started: LIVE
+[explorer] [INFO] [1795667164.614346881] [frontier_explorer]: Frontier ranking: 1.0 × length - 1.0 × distance + 3.0 × bias, bounds=[-1.145512985522207, -3.185512985522207, 6.245512985522207, 3.185512985522207], clearance=0.30 m
+[explorer] [WARN] [1795667164.819601413] [frontier_explorer]: Explorer not moving: state=WAIT_MAP, reason: waiting for exploration inputs (map=ready, pose=waiting for stable TF and new odometry)
+[mission_controller] [INFO] [1795667167.765778774] [mission_controller]: Waiting for explorer localization readiness before mission motion.
+[explorer] [INFO] [1795667168.024570973] [frontier_explorer]: Requesting gait 'flat' on /gait/request
+[explorer] [INFO] [1795667168.025008528] [frontier_explorer]: State: WAIT_MAP -> GAIT
+[special_obstacles] [INFO] [1795667168.027494614] [special_obstacles]: Gait command sent: 0x21010300
+[special_obstacles] [WARN] [1795667168.027972748] [special_obstacles]: GAIT: unknown -> flat (0x21010300, requested on /gait/request)
+[explorer] [INFO] [1795667168.214756710] [frontier_explorer]: Cell (0, 0) visited (1 total)
+[explorer] [INFO] [1795667168.614832021] [frontier_explorer]: Requesting gait 'flat' on /gait/request
+[explorer] [INFO] [1795667170.226333994] [explorer_navigator]: Spinning to angle 6.283185307179586....
+[explorer] [INFO] [1795667170.233045404] [frontier_explorer]: Look-around spin 360 deg (Nav2, collision-checked)
+[explorer] [INFO] [1795667170.234304493] [frontier_explorer]: State: GAIT -> SPIN
+[explorer] [WARN] [1795667171.219452069] [frontier_explorer]: Spin stopped early (TaskResult.FAILED): too close to a wall. Exploring anyway.
+[explorer] [INFO] [1795667171.219795188] [frontier_explorer]: State: SPIN -> SELECT
+[explorer] [INFO] [1795667171.414820634] [frontier_explorer]: GRID: going to cell (1, 0) (1 unvisited free cells, attempt 1/2)
+[explorer] [INFO] [1795667171.415252491] [frontier_explorer]: Route via cells [(0, 0), (1, 0)] (centring first)
+[explorer] [INFO] [1795667171.415861971] [explorer_navigator]: Navigating to goal: 0.0 0.0...
+[explorer] [INFO] [1795667171.417415184] [frontier_explorer]: Goal (1.02, 0.00), 1.1 m away, limit 29 s
+[explorer] [INFO] [1795667171.417714643] [frontier_explorer]: State: SELECT -> NAVIGATE
+[explorer] [INFO] [1795667171.815770796] [frontier_explorer]: Navigating to (1.02, 0.00), remaining=0.06 m, elapsed=0.2/29 s
+[explorer] [INFO] [1795667173.855470120] [frontier_explorer]: Navigating to (1.02, 0.00), remaining=0.13 m, elapsed=2.2/29 s
+[explorer] [INFO] [1795667174.879376538] [frontier_explorer]: Coverage saved: 3 poses -> /home/user/challenge_ws/coverage/coverage_20261126_042601.npz
+[explorer] [INFO] [1795667175.614846900] [frontier_explorer]: Centred in the cell (TaskResult.SUCCEEDED), going through 2 waypoints
+[explorer] [INFO] [1795667175.615731691] [explorer_navigator]: Navigating with 2 goals....
+[explorer] [INFO] [1795667175.915931765] [frontier_explorer]: Navigating to (1.02, 0.00), remaining=1.09 m, elapsed=4.4/29 s
+[explorer] [INFO] [1795667177.916044028] [frontier_explorer]: Navigating to (1.02, 0.00), remaining=1.09 m, elapsed=6.4/29 s
+[explorer] [INFO] [1795667179.918515849] [frontier_explorer]: Navigating to (1.02, 0.00), remaining=0.70 m, elapsed=8.4/29 s
+[explorer] [INFO] [1795667181.018766957] [frontier_explorer]: Cell (1, 0) visited (2 total)
+[explorer] [INFO] [1795667181.215257072] [frontier_explorer]: HOLD 2.5 s at goal so obstacle_detector can confirm
+[explorer] [INFO] [1795667181.215617213] [frontier_explorer]: State: NAVIGATE -> HOLD
+[explorer] [INFO] [1795667183.814727689] [frontier_explorer]: State: HOLD -> NAVIGATE
+[explorer] [INFO] [1795667183.815356725] [frontier_explorer]: State: NAVIGATE -> SELECT
+[explorer] [INFO] [1795667184.014579506] [frontier_explorer]: GRID: going to cell (1, 1) (2 unvisited free cells, attempt 1/2)
+[explorer] [INFO] [1795667184.015159554] [frontier_explorer]: Route via cells [(1, 0), (1, 1)] (centring first)
+[explorer] [INFO] [1795667184.015830011] [explorer_navigator]: Navigating to goal: 1.02 0.0...
+[explorer] [INFO] [1795667184.017327448] [frontier_explorer]: Goal (1.02, 1.02), 1.0 m away, limit 28 s
+[explorer] [INFO] [1795667184.017673598] [frontier_explorer]: State: SELECT -> NAVIGATE
+[explorer] [INFO] [1795667184.415246392] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.22 m, elapsed=0.2/28 s
+[explorer] [INFO] [1795667186.467186692] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.21 m, elapsed=2.2/28 s
+[explorer] [INFO] [1795667188.507244578] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.20 m, elapsed=4.3/28 s
+[explorer] [INFO] [1795667190.548302030] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.20 m, elapsed=6.3/28 s
+[explorer] [INFO] [1795667192.597531855] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.20 m, elapsed=8.4/28 s
+[explorer] [INFO] [1795667194.438188581] [explorer_navigator]: Canceling current task.
+[explorer] [WARN] [1795667194.439958916] [frontier_explorer]: Recovery after progress 0.02 m in 10.0 s, need 0.30 m; consecutive failures=1, backup time=0.0 s
+[explorer] [INFO] [1795667194.440383420] [frontier_explorer]: State: NAVIGATE -> RECOVER
+[explorer] [INFO] [1795667194.442269680] [frontier_explorer]: State: RECOVER -> SELECT
+[explorer] [INFO] [1795667194.615778708] [frontier_explorer]: GRID: going to cell (1, 1) (2 unvisited free cells, attempt 2/2)
+[explorer] [INFO] [1795667194.616751768] [frontier_explorer]: Route via cells [(1, 0), (1, 1)] (centring first)
+[explorer] [INFO] [1795667194.618399141] [explorer_navigator]: Navigating to goal: 1.02 0.0...
+[explorer] [INFO] [1795667194.621964927] [frontier_explorer]: Goal (1.02, 1.02), 1.0 m away, limit 28 s
+[explorer] [INFO] [1795667194.622482958] [frontier_explorer]: State: SELECT -> NAVIGATE
+[explorer] [WARN] [1795667194.835058260] [frontier_explorer]: grid alignment: walls -5.5 deg, +0.251 m (arena x), +0.107 m (arena y) from the mission.yaml grid (strength 0.29, 229 wall cells): cell centres are OFF. Start the robot centred and square, or fix start_cell_centre / start_heading_deg. Not corrected automatically.
+[explorer] [INFO] [1795667195.037591760] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.25 m, elapsed=0.2/28 s
+[explorer] [INFO] [1795667197.083217159] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.26 m, elapsed=2.3/28 s
+[explorer] [INFO] [1795667198.730939867] [frontier_explorer]: Centred in the cell (TaskResult.SUCCEEDED), going through 2 waypoints
+[explorer] [INFO] [1795667198.731760312] [explorer_navigator]: Navigating with 2 goals....
+[explorer] [INFO] [1795667199.129958544] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=1.00 m, elapsed=4.4/28 s
+[explorer] [INFO] [1795667201.314822761] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.95 m, elapsed=6.6/28 s
+[explorer] [INFO] [1795667203.315263599] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.56 m, elapsed=8.6/28 s
+[explorer] [INFO] [1795667203.822074218] [frontier_explorer]: Cell (1, 1) visited (3 total)
+[explorer] [INFO] [1795667205.315582542] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.32 m, elapsed=10.6/28 s
+[explorer] [INFO] [1795667207.515034799] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.32 m, elapsed=12.8/28 s
+[explorer] [INFO] [1795667209.716134371] [frontier_explorer]: Navigating to (1.02, 1.02), remaining=0.59 m, elapsed=15.0/28 s
+[explorer] [INFO] [1795667211.304121281] [explorer_navigator]: Canceling current task.

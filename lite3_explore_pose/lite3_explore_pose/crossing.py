@@ -6,6 +6,7 @@ it walks off in and when a terrain crossing is really finished can be unit-teste
 import math
 
 TERRAIN = ('rubble', 'potholes')
+STOPPED_ON_RUBBLE = 'stopped_on_rubble'  # /special/done outcome requiring manual recovery
 
 
 def terrain_in(dets, ahead_m=1.2, kinds=TERRAIN):

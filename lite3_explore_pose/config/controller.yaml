@@ -43,3 +43,4 @@ mission_controller:
     # ---- After a crossing (issue 8) ----
     same_kind_ignore_s: 10.0         # s; the same obstacle kind is ignored right after a crossing,
                                      # EXCEPT when that crossing needed a VERIFY revert
+    rubble_event_ignore_s: 10.0      # s after rubble to ignore stairs and potholes events

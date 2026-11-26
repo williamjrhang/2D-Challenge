@@ -15,7 +15,8 @@ Inputs (who sends them)
                                            "stairs_ahead", "rubble_ahead", "curtain_ahead",
                                            "new_area", "person", "qr"
   /perception/look_done  std_msgs/Bool     perception: finished looking (investigate)
-  /special/done          std_msgs/String   special obstacle node: "success" or "failed"
+  /special/done          std_msgs/String   "success", "failed" or "stopped_on_rubble"
+  /special/state         std_msgs/String   latched crossing phase, including rubble hold
   /exploration/done      std_msgs/Bool     explorer: nothing left to explore
   /mission/tasks_done    std_msgs/Bool     semantic map: every mission task found
   /mission/exit_pose     geometry_msgs/PointStamped  perception: where the exit is
@@ -44,7 +45,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from lite3_explore_pose.crossing import approach_pose, far_side
+from lite3_explore_pose.crossing import STOPPED_ON_RUBBLE, approach_pose, far_side
 from lite3_explore_pose.investigate import LookCooldown, photo_is_stale
 from lite3_explore_pose.mission_config import Arena, load_mission
 
@@ -118,6 +119,7 @@ class MissionController(Node):
         # seeing the obstacle behind us). NOT after a crossing whose VERIFY had to revert to
         # the terrain gait: the robot may still be on / at the rubble.
         p('same_kind_ignore_s', 10.0)
+        p('rubble_event_ignore_s', 10.0)   # rubble can be reclassified as stairs or potholes
         g = lambda n: self.get_parameter(n).value
         self.P = {n: g(n) for n in [
             'use_nav2', 'require_localization_ready', 'global_frame', 'tick_hz', 'investigate_timeout_s',
@@ -127,7 +129,7 @@ class MissionController(Node):
             'pose_jump_hard_m', 'pose_jump_recover_s', 'scene_investigate',
             'investigate_settle_s', 'max_relooks', 'stale_margin_s', 'look_cell_cooldown_s',
             'qr_wait_place', 'curtain_min_sightings', 'curtain_standoff_m', 'portal_return',
-            'portal_max_crossings', 'same_kind_ignore_s']}
+            'portal_max_crossings', 'same_kind_ignore_s', 'rubble_event_ignore_s']}
 
         cfg = load_mission(g('mission_file'))
         self.arena = Arena(cfg)
@@ -138,6 +140,8 @@ class MissionController(Node):
         self.create_subscription(String, '/perception/event', self.on_event, 10)
         self.create_subscription(Bool, '/perception/look_done', self.on_look_done, 10)
         self.create_subscription(String, '/special/done', self.on_special_done, 10)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, '/special/state', self.on_special_state, latched)
         self.last_special_reverted = False
         self.create_subscription(String, '/special/report', self.on_special_report, 10)
         self.create_subscription(Bool, '/exploration/done', self.on_explore_done, 10)
@@ -155,18 +159,16 @@ class MissionController(Node):
         # Issue 6: special_obstacles says AI mode is still on outside a crossing (stopped ON
         # the stairs). Then nothing may drive the robot until a person sends exit_ai.
         self.ai_active = False
-        self.create_subscription(Bool, '/special/ai_active', self.on_ai_active,
-                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_subscription(Bool, '/special/ai_active', self.on_ai_active, latched)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # ---- outputs ----
-        enable_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.explore_pub = self.create_publisher(Bool, '/exploration/enable', enable_qos)
+        self.explore_pub = self.create_publisher(Bool, '/exploration/enable', latched)
         self.special_pub = self.create_publisher(String, '/special/start', 10)
         self.look_pub = self.create_publisher(Bool, '/perception/look', 10)
         self.launch_pub = self.create_publisher(Bool, '/launch_drone', 10)
-        self.state_pub = self.create_publisher(String, '/mission/state', enable_qos)
+        self.state_pub = self.create_publisher(String, '/mission/state', latched)
 
         self.nav = None
         if self.P['use_nav2']:
@@ -195,6 +197,7 @@ class MissionController(Node):
         self.last_look_end = self.now_s()
         self.last_special_end = -1e9
         self.last_special_kind = None
+        self.last_rubble_end = -math.inf
         self.exit_goal_sent = False
         self.obstacles = []          # {kind, x, y, rx, ry, n, status: new | done | failed}
         self.target = None
@@ -214,7 +217,6 @@ class MissionController(Node):
         self.last_qr_found_t = None
         # [PORTAL] issue 7: crossed curtains {xy, from, to, crossings, status}
         self.portals = []
-        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.portal_pub = self.create_publisher(String, '/exploration/portal_crossed', latched)
 
         self.create_timer(1.0 / self.P['tick_hz'], self.tick)
@@ -234,20 +236,22 @@ class MissionController(Node):
     def on_event(self, msg):
         event = msg.data.strip()
         if event in SPECIAL_EVENTS:
-            if not self.localization_ready():
+            if self.state in ('TRAVERSE', 'DONE') or not self.localization_ready():
                 return
-            # Ignore while already crossing (detector keeps firing on the obstacle) and,
-            # just after a crossing, the SAME kind only (else it would cross it again). A
-            # different terrain right behind it is crossed in its own gait.
             kind = SPECIAL_EVENTS[event]
-            recent = (self.now_s() - self.last_special_end
-                      < self.P.get('same_kind_ignore_s', 10.0))
+            now = self.now_s()
+            if (kind in ('stairs', 'potholes')
+                    and now - self.last_rubble_end < self.P['rubble_event_ignore_s']):
+                self.get_logger().info(f'Event: {event} ignored after rubble crossing',
+                                       throttle_duration_sec=2.0)
+                return
+            recent = now - self.last_special_end < self.P.get('same_kind_ignore_s', 10.0)
             if recent and kind == self.last_special_kind and getattr(
                     self, 'last_special_reverted', False):
                 self.get_logger().warn(f'Event: {event} right after a {kind} crossing that '
                                        'needed a VERIFY revert: NOT ignored')
                 recent = False
-            if self.state == 'TRAVERSE' or (recent and kind == self.last_special_kind):
+            if recent and kind == self.last_special_kind:
                 return
             self.pending_special = kind
             self.get_logger().info(f'Event: {event} -> will traverse {kind}')
@@ -329,6 +333,21 @@ class MissionController(Node):
 
     def on_special_done(self, msg):
         self.special_result = msg.data.strip()
+        if self.special_result == STOPPED_ON_RUBBLE:
+            self.stop_on_rubble()
+
+    def on_special_state(self, msg):
+        if msg.data == 'rubble:HOLD_RUBBLE':
+            self.stop_on_rubble()
+
+    def stop_on_rubble(self):
+        if self.state == 'DONE':
+            return
+        self.get_logger().error('Rubble crossing stopped. Walk the robot clear with the '
+                                'joystick before restarting autonomy.')
+        self.pending_special = None
+        self.cancel_nav()
+        self.enter('DONE')
 
     def on_special_report(self, msg):
         try:
@@ -704,10 +723,15 @@ class MissionController(Node):
             self.get_logger().warn(
                 f'{self.current_special} timed out: ask marshal for manual help if stuck.')
             self.special_pub.publish(String(data='stop'))
+            if self.current_special == 'rubble':
+                self.stop_on_rubble()
+                return
         else:
             return
         self.last_special_end = self.now_s()
         self.last_special_kind = self.current_special
+        if self.current_special == 'rubble':
+            self.last_rubble_end = self.last_special_end
         ok = self.special_result == 'success'
         if self.current_special == 'curtain':
             self.get_logger().warn(f'CURTAIN: crossing {self.special_result or "timed out"}')

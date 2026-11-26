@@ -328,6 +328,11 @@ the obstacle, `lite3_auto`, then
 `curtain_distance_m`, and on the stairs the IMU pitch (`ros2 topic echo /imu/data`) for
 `on_stairs_pitch_deg` / `level_pitch_deg`.
 
+Rubble starts with a 30° pitch limit and a 25° roll limit. Set the pitch limit for the
+running node with `ros2 param set /special_obstacles rubble_max_pitch_deg 30.0` (25° to 35°).
+If `/special/done` reports `stopped_on_rubble`, autonomy stays paused for manual recovery.
+Stop the launch, use the joystick to walk clear, then restart autonomy.
+
 **6. Scene VLM + QR, robot still (10 min)** — `ros2 run lite3_explore_pose reporter`,
 `ros2 run lite3_explore_pose vlm_watcher`, `ros2 run lite3_explore_pose qr_reader`.
 Trigger a look: `ros2 topic pub --once /perception/look std_msgs/msg/Bool "{data: true}"` while
@@ -414,7 +419,7 @@ Finish with `gait_rough`. Take the drone off for these tests.
 | `/perception/look` / `look_done` | `std_msgs/Bool` | controller asks the VLM for a careful look / answer done |
 | `/perception/room`, `/perception/hazard` | `std_msgs/String` | latest room type / hazard label |
 | `/perception/found` | `std_msgs/String` (JSON) | item for the reporter |
-| `/special/start`, `/special/done` | `std_msgs/String` | start a crossing / `success` or `failed` |
+| `/special/start`, `/special/done` | `std_msgs/String` | start a crossing / `success`, `failed` or `stopped_on_rubble` |
 | `/exploration/enable` | `std_msgs/Bool` | pause / resume the explorer |
 | `/mission/tasks_done` | `std_msgs/Bool` | all expected tasks reported → go to final cell |
 | `/mission/state` | `std_msgs/String` | EXPLORE, INVESTIGATE, TRAVERSE, GO_TO_EXIT, LAUNCH, DONE |

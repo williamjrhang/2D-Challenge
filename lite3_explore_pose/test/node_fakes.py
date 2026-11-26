@@ -27,7 +27,7 @@ class Param:
 def fake_ros(params):
     pubs = {}
 
-    def declare(self, name, default=None):
+    def declare(self, name, default=None, descriptor=None):
         params.setdefault(name, default)
         return Param(params[name])
 
@@ -57,6 +57,7 @@ def make(cls, yaml_file=None, key=None, **overrides):
     with fake_ros(params) as pubs:
         node = cls()
     node.pubs = pubs
+    node.get_parameter = lambda name: Param(params[name])
     node.now_s = Clock()
     node.log = Mock()
     node.get_logger = lambda: node.log

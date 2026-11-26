@@ -29,7 +29,7 @@ special_obstacles:
     # ---- Speeds (m/s): start slow, raise only after it works ----
     stairs_speed: 0.15              # 22 Nov AI mode: 0.03 / 0.10 / 0.13 / 0.14 did not move; 0.15 climbs (keep the robot square to the stairs)
     stairs_max_roll_deg: 20.0       # abort when tipping sideways this much on the stairs
-    rubble_speed: 0.12
+    rubble_speed: 0.10
     curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)
     potholes_speed: 0.10
 
@@ -62,7 +62,8 @@ special_obstacles:
     tail_m: 0.45                    # base_link -> robot tail (~0.3) + margin
 
     # ---- Safety ----
-    max_tilt_deg: 25.0              # abort beyond this roll/pitch
+    max_tilt_deg: 25.0              # shared roll/pitch limit, also the roll limit on rubble
+    rubble_max_pitch_deg: 30.0      # absolute pitch on rubble, runtime range 25.0 to 35.0
     settle_s: 1.0
     progress_window_s: 6.0
     min_progress_m: 0.10

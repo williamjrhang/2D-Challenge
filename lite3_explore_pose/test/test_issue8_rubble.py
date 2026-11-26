@@ -4,12 +4,13 @@ import json
 import math
 import os
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 import lite3_explore_pose.special_obstacles as so
-from lite3_explore_pose.crossing import odom_jumped, verify_result, walked_enough
+from lite3_explore_pose.crossing import STOPPED_ON_RUBBLE, odom_jumped, verify_result, walked_enough
+from lite3_explore_pose.mission_controller import MissionController
 from lite3_explore_pose.special_obstacles import SpecialObstacles
 from node_fakes import CFG, make
 
@@ -41,10 +42,11 @@ def codes(n):
     return [c.args[0].cmd_code for c in n.pubs['/simple_cmd'].publish.call_args_list]
 
 
-def step(n, dt=0.05, dx=0.0, dets=None, pitch=0.0):
+def step(n, dt=0.05, dx=0.0, dets=None, pitch=0.0, roll=0.0):
     n.now_s.t += dt
     n._x += dx
     n.pitch = math.radians(pitch)
+    n.roll = math.radians(roll)
     n.odom['/odom'] = (n.now_s.t, (n._x, 0.0), 0.0)
     if dets is not None:
         n.last_dets = (n.now_s.t, dets)
@@ -73,9 +75,46 @@ def test_stuck_with_fresh_odometry_never_finishes_on_time():
     assert n.phase == 'CROSS'                 # new: odometry decides, keeps going
     for _ in range(int(20 / 0.05)):           # until max_time_s (45 s) aborts it
         step(n, dx=0.001, dets=[])
-    assert n.phase == 'IDLE'
+    assert n.phase == 'HOLD_RUBBLE' and codes(n)[-1] == HSTEP
     results = [c.args[0] for c in n.pubs['/special/done'].publish.call_args_list]
-    assert results == [String(data='failed')]
+    assert results == [String(data=STOPPED_ON_RUBBLE)]
+
+
+def test_rubble_pitch_allows_the_climb_but_excess_roll_stops_in_high_step():
+    n = node()
+    start_rubble(n)
+    for _ in range(20):
+        step(n, dx=0.006, dets=RUBBLE, pitch=-29.0)
+    assert n.phase == 'CROSS' and codes(n)[-1] == HSTEP
+
+    drive = n.pubs['/nav_cmd_vel'].publish
+    drive.reset_mock()
+    for _ in range(15):
+        step(n, dx=0.006, dets=RUBBLE, pitch=-29.0, roll=26.0)
+    assert n.phase == 'HOLD_RUBBLE'
+    assert drive.call_args.args[0].linear.x == drive.call_args.args[0].angular.z == 0.0
+    assert all(c.args[0].linear.x >= 0.0 for c in drive.call_args_list)
+    n.pubs['/special/done'].publish.assert_called_once_with(String(data=STOPPED_ON_RUBBLE))
+
+    for cmd in ('stop', 'potholes', 'stairs'):
+        n.on_start(String(data=cmd))
+    n.on_gait_request(String(data='flat'))
+    assert n.phase == 'HOLD_RUBBLE' and set(codes(n)) == {HSTEP}
+
+
+def test_rubble_pitch_limit_update_applies_during_the_crossing():
+    n = node()
+    start_rubble(n)
+    limit = SimpleNamespace(value=32.0)
+    n.get_parameter = Mock(return_value=limit)
+    for _ in range(15):
+        step(n, dx=0.006, dets=RUBBLE, pitch=31.0)
+    assert n.phase == 'CROSS'
+    limit.value = 30.0
+    for _ in range(15):
+        step(n, dx=0.006, dets=RUBBLE, pitch=31.0)
+    assert n.phase == 'HOLD_RUBBLE' and codes(n)[-1] == HSTEP
+    n.get_parameter.assert_called_with('rubble_max_pitch_deg')
 
 
 def test_clear_floor_early_still_needs_the_full_distance_then_verify_ok():
@@ -124,8 +163,56 @@ def test_odometry_jump_switches_to_time_mode():
     assert n.odom_src is None and n.phase == 'CROSS'
 
 
+def test_stop_during_rubble_verify_restores_high_step_and_holds():
+    n = node()
+    start_rubble(n)
+    n.finish('success')
+    assert n.phase == 'VERIFY' and codes(n)[-1] == FLAT
+    n.on_start(String(data='stop'))
+    assert n.phase == 'HOLD_RUBBLE' and codes(n)[-1] == HSTEP
+
+
+def controller():
+    with (patch.object(MissionController, 'now_s', return_value=100.0),
+          patch('lite3_explore_pose.mission_controller.TransformListener')):
+        return make(MissionController, 'controller.yaml', 'mission_controller', use_nav2=False,
+                    mission_file=os.path.join(CFG, 'mission.yaml'))
+
+
+def test_mission_stays_paused_on_rubble_hold_even_if_done_arrives_first():
+    m = controller()
+    m.current_special = 'rubble'
+    m.enter('TRAVERSE')
+    m.on_special_done(String(data=STOPPED_ON_RUBBLE))
+    m.on_special_state(String(data='rubble:HOLD_RUBBLE'))
+    m.now_s.t += 60.0
+    m.on_event(String(data='stairs_ahead'))
+    m.tick()
+    assert m.state == 'DONE' and m.pending_special is None
+    m.explore_pub.publish.assert_called_with(Bool(data=False))
+
+
+def test_mission_ignores_stairs_and_potholes_briefly_after_rubble():
+    m = controller()
+    m.current_special = 'rubble'
+    m.enter('TRAVERSE')
+    m.on_special_done(String(data='success'))
+    m.do_traverse()
+    assert m.state == 'EXPLORE'
+
+    for kind in ('potholes', 'stairs'):
+        m.on_event(String(data=f'{kind}_ahead'))
+        assert m.pending_special is None
+    m.on_event(String(data='curtain_ahead'))
+    assert m.pending_special == 'curtain'
+
+    m.now_s.t += 10.0
+    for kind in ('potholes', 'stairs'):
+        m.on_event(String(data=f'{kind}_ahead'))
+        assert m.pending_special == kind
+
+
 def test_mission_does_not_ignore_same_kind_after_a_revert():
-    from lite3_explore_pose.mission_controller import MissionController
     m = object.__new__(MissionController)
     m.P = {'require_localization_ready': False, 'same_kind_ignore_s': 10.0}
     m.state, m.pending_special = 'EXPLORE', None

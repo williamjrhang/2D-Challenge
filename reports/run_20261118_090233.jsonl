@@ -1,5 +1,0 @@
-{"time": 1794992566.3068554, "status": "dry_run", "report": {"group_id": "group05", "task_id": "S01", "task_type": "survivor", "scene_type": "unknown", "label": "survivor", "pos": [1.5, 0.5], "message": ""}}
-{"time": 1794992613.5805078, "status": "dry_run", "report": {"group_id": "group05", "task_id": "S02", "task_type": "survivor", "scene_type": "unknown", "label": "survivor", "pos": [6.5, -0.5], "message": ""}}
-{"time": 1794992669.8655698, "status": "dry_run", "report": {"group_id": "group05", "task_id": "S03", "task_type": "survivor", "scene_type": "unknown", "label": "survivor", "pos": [3.5, -2.5], "message": ""}}
-{"time": 1794992688.7651298, "status": "dry_run", "report": {"group_id": "group05", "task_id": "S04", "task_type": "survivor", "scene_type": "office", "label": "survivor", "pos": [61.5, 25.5], "message": ""}}
-{"time": 1794992699.2487605, "status": "dry_run", "report": {"group_id": "group05", "task_id": "S05", "task_type": "survivor", "scene_type": "unknown", "label": "survivor", "pos": [847.5, 416.5], "message": ""}}
