@@ -8,3 +8,8 @@ __pycache__/
 /debug/*.log
 /models/**/*.pt
 .DS_Store
+/reports/**
+/frames/**
+/runs/**
+/coverage/**
+
