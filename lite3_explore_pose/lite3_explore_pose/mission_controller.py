@@ -19,6 +19,7 @@ Inputs (who sends them)
   /special/state         std_msgs/String   latched crossing phase, including rubble hold
   /exploration/done      std_msgs/Bool     explorer: nothing left to explore
   /exploration/status    std_msgs/String   explorer: confirms it is idle before curtain approach
+  /exploration/room_priority std_msgs/Bool explorer: finish a nearby room before obstacle detours
   /mission/tasks_done    std_msgs/Bool     semantic map: every mission task found
   /mission/exit_pose     geometry_msgs/PointStamped  perception: where the exit is
 
@@ -149,6 +150,7 @@ class MissionController(Node):
         self.create_subscription(String, '/special/report', self.on_special_report, 10)
         self.create_subscription(Bool, '/exploration/done', self.on_explore_done, 10)
         self.create_subscription(String, '/exploration/status', self.on_explore_status, 1)
+        self.create_subscription(Bool, '/exploration/room_priority', self.on_room_priority, 1)
         self.create_subscription(Bool, '/mission/tasks_done', self.on_tasks_done, 10)
         self.create_subscription(PointStamped, '/mission/exit_pose', self.on_exit_pose, 10)
         self.localization_ready_at = None
@@ -191,6 +193,7 @@ class MissionController(Node):
         self.look_done = False
         self.special_result = None
         self.explore_done = False
+        self.room_priority = False
         self.tasks_done = False
         # Final cell from mission.yaml (arena coords) -> map. /mission/exit_pose can override.
         self.exit_xy = (self.arena.arena_to_map(*self.arena.final)
@@ -382,6 +385,9 @@ class MissionController(Node):
 
     def on_explore_done(self, msg):
         self.explore_done = msg.data
+
+    def on_room_priority(self, msg):
+        self.room_priority = msg.data
 
     def on_tasks_done(self, msg):
         self.tasks_done = msg.data
@@ -618,7 +624,7 @@ class MissionController(Node):
         self.enter('GO_TO_EXIT' if self.out_of_time else 'EXPLORE')
 
     def do_explore(self):
-        target = self.pick_target()
+        target = None if self.room_priority else self.pick_target()
         if target is not None:
             self.target = target
             self.get_logger().info(

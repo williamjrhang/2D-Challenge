@@ -69,6 +69,7 @@ def explorer_for_test():
     explorer.goal_xy = (2.0, 0.0)
     explorer.goal_yaw = 0.0
     explorer.goal_kind = 'cell'
+    explorer.goal_prioritizes_room = False
     explorer.goal_is_frontier = False
     arena = Arena({'arena': {'cell_size_m': 1.02, 'start_cell_centre': [0, 0],
                              'start_heading_deg': 0}})
@@ -83,6 +84,8 @@ def explorer_for_test():
     explorer.send_goal = Mock(return_value=True)
     explorer.update_cells = Mock()
     explorer.localization_pub = Mock()
+    explorer.room_priority_pub = Mock()
+    explorer.has_room_priority = Mock(return_value=False)
     explorer.grid = Mock()
     explorer.robot_pose = Mock(return_value=None)
     explorer.pose_problem = 'odom -> base_link unavailable'

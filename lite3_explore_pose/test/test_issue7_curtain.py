@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import numpy as np
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker
 
 from lite3_explore_pose.crossing import approach_pose, far_side
@@ -63,6 +63,7 @@ def controller():
            'approach_kinds': ['rubble', 'curtain'], 'global_frame': 'map'}
     m.arena = ARENA
     m.portals, m.obstacles = [], []
+    m.room_priority = False
     m.portal_pub = Mock()
     m.curtain_marker_pub = Mock()
     m.get_clock = Mock()
@@ -132,6 +133,42 @@ def test_curtain_location_is_saved_before_approach():
     m.do_explore()
     m.enter.assert_called_once_with('APPROACH')
     assert (m.target['kind'], m.target['x'], m.target['y']) == ('curtain', 2.1, 0.1)
+
+
+def test_room_priority_defers_a_rubble_detour_until_the_room_is_clear():
+    m = controller()
+    m.tasks_done = m.explore_done = False
+    m.P['look_every_s'] = 0.0
+    rubble = {'kind': 'rubble', 'x': 1.02, 'y': 0.0}
+    m.pick_target = Mock(return_value=rubble)
+
+    m.on_room_priority(Bool(data=True))
+    m.do_explore()
+    m.pick_target.assert_not_called()
+    m.enter.assert_not_called()
+
+    m.on_room_priority(Bool(data=False))
+    m.do_explore()
+    assert m.target is rubble
+    m.enter.assert_called_once_with('APPROACH')
+
+
+def test_confirmed_crossing_can_interrupt_a_room_visit():
+    m = controller()
+    m.state = 'EXPLORE'
+    m.P['pose_jump_m'] = 0.0
+    m.time_limit = 0.0
+    m.now_s = Mock(return_value=10.0)
+    m.start_time = 0.0
+    m.pending_special = 'rubble'
+    m.cancel_nav = Mock()
+    m.on_room_priority(Bool(data=True))
+
+    m.tick()
+
+    assert m.current_special == 'rubble'
+    m.cancel_nav.assert_called_once_with()
+    m.enter.assert_called_once_with('TRAVERSE')
 
 
 def test_close_curtain_event_requires_completed_alignment():
@@ -213,6 +250,7 @@ def test_explorer_acknowledges_pause_after_nav2_action_finishes():
     e.P = {'coverage_enabled': False, 'dry_run': False}
     e.robot_pose = Mock(return_value=None)
     e.localization_pub = Mock()
+    e.room_priority_pub = Mock()
     e.grid = None
     e.now_s = Mock(return_value=11.0)
     e.deferred_goals = {}

@@ -100,7 +100,7 @@ frontier_explorer:
     # (room_check_radius_m) before frontiers; every remaining room before camera coverage.
     # Launch switch: room_check:=true. /exploration/cells (RViz) shows cells, walls, rooms.
     room_check: false
-    room_check_radius_m: 3.0
+    room_check_radius_m: 3.0         # also prioritizes reachable unvisited three-wall cells in grid mode
     room_dwell_s: 2.5
     room_max_attempts: 2
     cell_overlay: true

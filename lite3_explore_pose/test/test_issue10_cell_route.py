@@ -85,6 +85,7 @@ def make_explorer(walls=WALLS, *, grid_explore=False):
            'time_limit_per_m_s': 8.0, 'no_backup_after_crossing_s': 0.0,
            'grid_explore': grid_explore, 'dry_run': False, 'grid_max_attempts': 2,
            'blacklist_radius_m': 0.30, 'cell_visit_edge_margin_m': 0.10,
+           'room_check_radius_m': 3.0,
            'pose_goal_tolerance_m': 0.35, 'pose_result_wait_s': 2.0}
     e.cells = G
     e.cell_info = {
@@ -93,6 +94,7 @@ def make_explorer(walls=WALLS, *, grid_explore=False):
         for cell, sides in walls.items()
     }
     e.visited_cells, e.wall_memory = set(), {}
+    e.enabled, e.state, e.goal_prioritizes_room = True, 'SELECT', False
     e.cell_attempts, e.deferred_goals = {}, {}
     e.nav = Mock()
     e.nav.get_clock.return_value.now.return_value.to_msg.return_value = Time()
@@ -152,6 +154,39 @@ def test_grid_prefers_shorter_open_route_over_geometrically_nearer_cell():
     assert e.start_cell(e.last_pose)
 
     assert e.send_goal.call_args.args[0] == G.centre((0, -1))
+
+
+def test_reachable_three_wall_room_takes_priority_over_a_shorter_grid_route():
+    room = (2, 0)
+    walls = {(0, 0): set(), (0, 1): set(), (1, 0): set(),
+             room: {'+x', '+y', '-y'}}
+    e = make_explorer(walls, grid_explore=True)
+    e.visited_cells = {(0, 0), (1, 0)}
+    e.send_goal = Mock(return_value=True)
+
+    assert e.has_room_priority(e.last_pose)
+    assert e.start_cell(e.last_pose)
+    assert e.send_goal.call_args.args[0] == G.centre((1, 0))
+    assert e.goal_prioritizes_room
+
+    # The room's only doorway is now blocked on the approach side.
+    e.wall_memory[(1, 0)] = {'+x'}
+    assert not e.has_room_priority(e.last_pose)
+    assert e.start_cell(e.last_pose)
+    assert e.send_goal.call_args.args[0] == G.centre((0, 1))
+
+
+def test_room_priority_stays_set_during_the_rooms_last_allowed_attempt():
+    room = (1, 0)
+    e = make_explorer({(0, 0): set(), room: {'+x', '+y', '-y'}}, grid_explore=True)
+    e.cell_attempts[room] = 1
+    e.send_goal = Mock(return_value=True)
+    assert e.start_cell(e.last_pose)
+
+    e.state = 'NAVIGATE'
+    assert e.has_room_priority(e.last_pose)
+    e.state = 'SELECT'
+    assert not e.has_room_priority(e.last_pose)
 
 
 def test_grid_dispatches_only_the_adjacent_cell():

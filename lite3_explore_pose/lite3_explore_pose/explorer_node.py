@@ -14,6 +14,7 @@ Topics
   in   /exploration/bias       geometry_msgs/PointStamped  prefer frontiers near here
                                                           (send frame_id "" to clear)
   out  /exploration/status     std_msgs/String          current state
+  out  /exploration/room_priority std_msgs/Bool        nearby room visit in progress or reachable
   out  /exploration/done       std_msgs/Bool            True when nothing left to explore
   out  /exploration/frontiers  visualization_msgs/MarkerArray  for RViz
   out  /cmd_vel                geometry_msgs/Twist      only during spin / back-up
@@ -283,6 +284,7 @@ class FrontierExplorer(Node):
         self.visit_sample = None
         self.room_status = {}             # cell -> {'attempts', 'done', 'views_done'}
         self.room = None                  # Room being checked
+        self.goal_prioritizes_room = False
         self.room_idx = 0
         self.room_phase = None
         self.room_until = None
@@ -343,6 +345,7 @@ class FrontierExplorer(Node):
 
         self.cmd_pub = self.create_publisher(Twist, g('cmd_vel_topic'), 10)
         self.status_pub = self.create_publisher(String, '/exploration/status', 10)
+        self.room_priority_pub = self.create_publisher(Bool, '/exploration/room_priority', 1)
         self.done_pub = self.create_publisher(Bool, '/exploration/done', 10)
         self.localization_pub = self.create_publisher(Bool, '/exploration/localization_ready', 1)
         self.marker_pub = self.create_publisher(MarkerArray, '/exploration/frontiers', 10)
@@ -636,6 +639,7 @@ class FrontierExplorer(Node):
         self.goal_is_frontier = is_frontier
         # [COVER] [HOLD] goal kind + per-goal flags
         self.goal_kind = kind or ('frontier' if is_frontier else 'return')
+        self.goal_prioritizes_room = self.goal_kind == 'room'
         self.goal_dwell_done = False
         self.goal_hold_used = False
         self.goal_target_cell = target      # [ENTER]
@@ -837,9 +841,11 @@ class FrontierExplorer(Node):
             self.set_state('SELECT')
             return
         self.get_logger().info(f'Localization recovered; retrying goal {self.goal_xy} once.')
+        prioritizes_room = self.goal_prioritizes_room
         accepted = self.send_goal(self.goal_xy, pose[:2], self.goal_is_frontier,
                                   self.goal_kind, self.goal_yaw, retry=True,
                                   **(self.enter_kwargs() if self.goal_is_frontier else {}))
+        self.goal_prioritizes_room = bool(prioritizes_room and accepted)
         self.set_state('NAVIGATE' if accepted else 'SELECT')
 
     def publish_markers(self, ranked):
@@ -1058,7 +1064,6 @@ class FrontierExplorer(Node):
     def tick(self):
         pose = self.robot_pose()
         self.last_pose = pose
-        self.localization_pub.publish(Bool(data=(pose is not None and self.grid is not None)))
         now = self.now_s()
         self.deferred_goals = {xy: until for xy, until in self.deferred_goals.items()
                                if until > now}
@@ -1068,6 +1073,8 @@ class FrontierExplorer(Node):
             self.update_coverage(pose)
 
         self.update_cells(pose)  # [ROOM]
+        self.room_priority_pub.publish(Bool(data=self.has_room_priority(pose)))
+        self.localization_pub.publish(Bool(data=(pose is not None and self.grid is not None)))
         if not self.enabled:
             if self.pose_retry_pending:
                 self.release_goal_attempt()
@@ -1680,6 +1687,9 @@ class FrontierExplorer(Node):
         if self.grid is None or pose is None:
             self.log_missing_inputs(pose)
             return
+        if self.grid_routes(pose, rooms_only=True)[1]:
+            self.set_state('SELECT')
+            return
         # 1. Frontiers back (map changed)? Then normal exploration.
         if self.eligible_frontiers(pose):
             self.get_logger().info('COVER: new frontiers appeared, back to frontier exploration.')
@@ -1778,10 +1788,25 @@ class FrontierExplorer(Node):
                 out.append((d, room))
         return [r for _, r in sorted(out, key=lambda t: t[0])]
 
-    def start_cell(self, pose):
-        """[GRID] Take one step toward a reachable unvisited cell."""
-        if not self.P['grid_explore'] or self.P['dry_run'] or pose is None or not self.cell_info:
+    def has_room_priority(self, pose):
+        if pose is None or self.P['dry_run'] or self.state == 'DONE':
             return False
+        if (self.enabled and self.state in ('NAVIGATE', 'HOLD', 'ROOM_LOOK', 'SPIN', 'WAIT_POSE')
+                and self.goal_prioritizes_room):
+            return True
+        return bool(self.grid_routes(pose, rooms_only=True)[1])
+
+    def grid_routes(self, pose, *, rooms_only=False):
+        """Find open routes to unvisited cells, prioritizing nearby three-wall rooms."""
+        if not self.P['grid_explore'] or self.P['dry_run'] or pose is None or not self.cell_info:
+            return {}, []
+        room_radius = self.P['room_check_radius_m']
+        nearby_rooms = {cell for cell, ci in self.cell_info.items()
+                        if ci.state == 'free' and len(ci.walls) == 3 and ci.goal is not None
+                        and cell not in self.visited_cells
+                        and math.dist(ci.goal, pose[:2]) <= room_radius}
+        if rooms_only and not nearby_rooms:
+            return {}, []
         here = self.cells.cell_of(pose[0], pose[1])
         max_attempts = self.P['grid_max_attempts']
         walls = self.route_walls()
@@ -1800,15 +1825,25 @@ class FrontierExplorer(Node):
                 del walls[cell]
         routes = []
         for cell, goal in goals.items():
-            if (cell in self.visited_cells or
+            if ((rooms_only and cell not in nearby_rooms) or cell in self.visited_cells or
                     (cell == here and self.cells.in_visit_region(cell, *pose[:2]))):
                 continue
             path = bfs(here, cell, walls)
             if path:
                 next_cell = path[1] if len(path) > 1 else here
-                routes.append((len(path), math.dist(goal, pose[:2]), cell, next_cell))
+                routes.append((cell not in nearby_rooms, len(path), math.dist(goal, pose[:2]),
+                               cell, next_cell))
+        return goals, routes
+
+    def start_cell(self, pose):
+        """[GRID] Take one step toward a reachable unvisited cell."""
+        goals, routes = self.grid_routes(pose)
+        if not routes:
+            return False
+        here = self.cells.cell_of(*pose[:2])
+        max_attempts = self.P['grid_max_attempts']
         tried = set()
-        for _, _, destination, next_cell in sorted(routes):
+        for ordinary, _, _, destination, next_cell in sorted(routes):
             if next_cell in tried:
                 continue
             tried.add(next_cell)
@@ -1817,6 +1852,7 @@ class FrontierExplorer(Node):
                 f'GRID: step {here} -> {next_cell} toward {destination} '
                 f'(attempt {self.cell_attempts[next_cell]}/{max_attempts})')
             if self.send_goal(goals[next_cell], pose[:2], is_frontier=False, kind='cell'):
+                self.goal_prioritizes_room = not ordinary
                 self.set_state('NAVIGATE')
                 return True
         return False
