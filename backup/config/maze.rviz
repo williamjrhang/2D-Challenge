@@ -1,0 +1,148 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Enabled: true
+      Topic:
+        Value: /map
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Alpha: 0.7
+      Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: Local costmap (what Nav2 avoids)
+      Enabled: true
+      Topic:
+        Value: /local_costmap/costmap
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Alpha: 0.4
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan (walls)
+      Enabled: true
+      Topic:
+        Value: /scan
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        History Policy: Keep Last
+      Size (m): 0.04
+      Color Transformer: FlatColor
+      Color: 255; 0; 0
+    - Class: rviz_default_plugins/Map
+      Name: Camera coverage (purple = not seen yet)
+      Enabled: true
+      Topic:
+        Value: /exploration/coverage
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Alpha: 0.5
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/Path
+      Name: Walked trail (coverage poses)
+      Enabled: true
+      Topic:
+        Value: /exploration/trail
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color: 25; 220; 255
+      Line Style: Lines
+      Line Width: 0.03
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Frontiers (orange/blue) + coverage goals (green)
+      Enabled: true
+      Topic:
+        Value: /exploration/frontiers
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Maze cells (green visited)
+      Enabled: true
+      Topic:
+        Value: /exploration/cells
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+    - Class: rviz_default_plugins/Path
+      Name: Nav2 plan
+      Enabled: true
+      Topic:
+        Value: /plan
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color: 0; 200; 0
+      Line Style: Billboards
+      Line Width: 0.03
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Found (reports)
+      Enabled: true
+      Topic:
+        Value: /mission/found_markers
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+    - Class: rviz_default_plugins/MarkerArray
+      Name: QR wall pins
+      Enabled: true
+      Topic:
+        Value: /wall_pins/markers
+        Depth: 5
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: false
+      Marker Scale: 0.4
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: true
+    - Class: rviz_default_plugins/Image
+      Name: YOLO (stairs / curtain / rubble)
+      Enabled: true
+      Topic:
+        Value: /perception/obstacle_image/compressed
+        Depth: 2
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 15
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 60
+      X: 0
+      Y: 0
+    Saved: ~

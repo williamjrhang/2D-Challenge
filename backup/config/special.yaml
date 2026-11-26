@@ -1,0 +1,95 @@
+special_obstacles:
+  ros__parameters:
+    # ---- Topics: check with `ros2 topic list` on the robot ----
+    imu_topic: /imu/data            # checked 18/11: ~200 Hz
+    odom_topics: [/odom, /leg_odom2]   # /odom = Fast-LIO (odom_relay), doesn't slip -> first. First fresh one is used; none -> walk by time
+    cmd_vel_topic: /nav_cmd_vel     # twist_mux input (joystick /joy_cmd_vel overrides). NEVER /cmd_vel
+
+    # ---- Gait codes: ONLY in config/gait.yaml (issue 4). This node owns the gait,
+    # logs every switch and publishes it latched on /gait/current (flat / high_step / ai).
+    # Terrain -> gait is in gait.yaml too (rubble, potholes -> high_step).
+    gait_file: ""                    # "" = installed config/gait.yaml
+
+    # ---- Stairs = AI mode (organisers' rule, 17/11) ----
+    # ONLY for stairs: enter at most 1 cell before, exit at most 1 cell after.
+    # AI mode on any other terrain = no points for it. No jumps / stunts.
+    stairs_use_ai_mode: true
+    # false = send gait codes directly (worked in auto mode for potholes on 17/11).
+    # true  = code flips manual -> gait -> auto in 0.6 s (fallback, only if direct fails).
+    gait_via_manual: false
+    ai_resend_auto: true            # gait.yaml 'auto' re-sent 1 s after Enter AI: without it AI mode ignores code commands (22 Nov)
+    stairs_progress_window_s: 15.0  # stairs only: must move stairs_min_progress_m in this time (was 10)
+    stairs_min_progress_m: 0.05
+    stairs_max_pitch_deg: 45.0      # 22 Nov: a step briefly pitched 40 deg and aborted
+    tilt_hold_s: 0.5                # tilt must stay over the limit this long to abort (step peaks are brief)
+    stairs_stall_s: 4.0             # not moving this long on the stairs -> push harder ...
+    stairs_boost_step: 0.02         # ... by this much each time ...
+    stairs_max_speed: 0.20          # ... up to this (AI mode stood still at the top edge, 22 Nov)
+
+    # ---- Speeds (m/s): start slow, raise only after it works ----
+    stairs_speed: 0.15              # 22 Nov AI mode: 0.03 / 0.10 / 0.13 / 0.14 did not move; 0.15 climbs (keep the robot square to the stairs)
+    stairs_max_roll_deg: 20.0       # abort when tipping sideways this much on the stairs
+    rubble_speed: 0.10
+    curtain_speed: 0.20             # 0.10 walked stop-start (live test 17/11)
+    potholes_speed: 0.10
+
+    # ---- Stairs: MEASURE on a real step (ros2 topic echo the IMU) ----
+    on_stairs_pitch_deg: 8.0        # tilt while on the steps
+    level_pitch_deg: 3.0            # tilt when level again
+    level_hold_s: 1.5
+    stairs_min_distance_m: 0.5
+    stairs_up_and_down: true        # UP, platform, DOWN in ONE AI session: finish only after
+                                    # tilting one way, then the other way, then level
+    stairs_max_time_s: 120.0        # stairs time limit (max_time_s below is for the others)
+    # Leaving AI mode (issue 6). Stairs: 3 steps up, 3 down, 14 cm each (team, 26/11).
+    stairs_exit_after_m: 0.35       # m walked (odometry) after the last tilted step AND level for
+                                    # level_hold_s -> exit AI. 0.35: base_link -> rear feet ~0.3 m
+    stairs_exit_max_m: 0.9          # m; exit AI here at the latest (rule: <= 1 cell = 1.02 m after)
+    ai_exit_resend_auto: true       # after Exit AI send AUTO (gait.yaml 'auto') before the gait
+    ai_exit_wait_s: 1.5             # s after Exit AI before AUTO (AI takes a moment to switch off)
+    auto_to_gait_s: 1.0             # s after AUTO before the terrain gait
+    terrain_fresh_s: 1.5            # s; detector frame older than this = no data -> flat gait
+
+    # ---- Distances (m) ----
+    rubble_distance_m: 1.2          # TODO: rubble cell length + margin
+    curtain_distance_m: 1.5         # robot 0.61 m + curtain + margin (1.0 did not get fully through)
+    potholes_distance_m: 1.6        # pothole area + robot length (guess, adjust after a run)
+    # Walk = measured distance to the obstacle + its length + tail_m (the *_distance_m above
+    # are the minimum). MEASURE the lengths along the walking direction (~1.02 m per cell).
+    rubble_length_m: 1.02
+    potholes_length_m: 1.02
+    curtain_length_m: 0.05
+    tail_m: 0.45                    # base_link -> robot tail (~0.3) + margin
+
+    # ---- Safety ----
+    max_tilt_deg: 25.0              # shared roll/pitch limit, also the roll limit on rubble
+    rubble_max_pitch_deg: 30.0      # absolute pitch on rubble, runtime range 25.0 to 35.0
+    settle_s: 1.0
+    progress_window_s: 6.0
+    min_progress_m: 0.10
+    backoff_speed: 0.08
+    backoff_s: 2.0
+    max_time_s: 45.0
+    wall_stop_m: 0.45               # rubble/potholes crossing stops when a wall is this close (depth)
+    curtain_max_tilt_deg: 12.0      # curtain floor is flat: more tilt = pushing a wall -> abort
+    # Rubble / potholes follow the DETECTOR: high step while terrain is seen ahead, then
+    # terrain_clear_extra_m more once the floor ahead is clear for terrain_clear_s.
+    terrain_follow: true
+    terrain_clear_s: 1.0
+    terrain_clear_extra_m: 0.7
+    terrain_max_factor: 1.6         # never walk more than this x the fixed distance
+
+    # ---- Rubble / potholes finish + VERIFY (issue 8) ----
+    # 22-25/11: crossings finished by time while odometry showed the robot stuck, and the
+    # detector saw flat floor past the rubble while the back legs were still on it.
+    odom_max_speed: 0.6              # m/s; odometry growing faster = a jump (25/11: 11 m in 10 s)
+                                     # -> dropped, crossing continues by time
+    verify_enabled: true             # after switching back to flat, walk slowly and check
+    verify_settle_s: 1.0             # s standing still while the flat gait engages
+    verify_s: 3.0                    # s walking at verify_speed
+    verify_speed: 0.08               # m/s; 3 s x 0.08 = 0.24 m expected
+    verify_min_progress_m: 0.10      # m odometry in verify_s; less = stuck (still on the rubble)
+    verify_tilt_deg: 6.0             # deg pitch/roll during VERIFY; more = still on uneven ground
+                                     # (flat floor while walking: < 3 deg)
+    verify_extra_m: 0.5              # m to CROSS again in the previous terrain gait after a revert
+    verify_max_retries: 2            # reverts, then report 'failed'
