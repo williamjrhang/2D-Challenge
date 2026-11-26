@@ -5,7 +5,9 @@ group_id: group05_Gp05            # 25 Nov: server accepts ONLY this spelling (G
                                   # scene server AND the scoring server.
 
 scene_server: http://192.168.10.141:8000/analyze
-report_server: http://192.168.10.141:8001/task_report
+# Practice: use task_report_A for the left arena or task_report_B for the right arena
+# when facing the canteen. Either endpoint works during competition.
+report_server: http://192.168.10.141:8001/task_report_A
 send_reports: false               # false = only log what WOULD be sent. true on competition day.
 
 # ---- Arena coordinates (booklet F, "Localization Reference Frame") ----
